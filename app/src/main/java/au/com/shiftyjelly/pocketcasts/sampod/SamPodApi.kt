@@ -38,7 +38,8 @@ class SamPodApi(
         return try {
             client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                 if (!resp.isSuccessful) return null
-                resp.body?.string()?.let { sidecarAdapter.fromJson(it) }
+                // OkHttp 5: ResponseBody is non-null → no safe-call (warnings-as-errors).
+                sidecarAdapter.fromJson(resp.body.string())
             }
         } catch (e: Exception) {
             null
