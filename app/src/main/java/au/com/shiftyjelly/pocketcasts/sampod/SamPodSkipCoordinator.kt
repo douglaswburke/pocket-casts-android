@@ -1,8 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.sampod
 
 import android.util.Log
+import au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
+import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -26,6 +28,7 @@ class SamPodSkipCoordinator(
     private val scope: CoroutineScope,
     private val serverUrl: String,
     private val token: String,
+    private val episodeManager: EpisodeManager,
 ) {
     private val api = SamPodApi(baseUrl = serverUrl.trimEnd('/'), token = token)
     private val controller = AdSkipController()
@@ -61,13 +64,28 @@ class SamPodSkipCoordinator(
     }
 
     private suspend fun loadSidecar(): Sidecar? = withContext(Dispatchers.IO) {
-        val url = playbackManager.getCurrentEpisode()?.downloadUrl ?: run {
+        val episode = playbackManager.getCurrentEpisode() ?: run {
+            Log.w(TAG, "no current episode")
+            return@withContext null
+        }
+        val url = episode.downloadUrl ?: run {
             Log.w(TAG, "no downloadUrl for current episode")
             return@withContext null
         }
         val id = sha1Id(url)
         Log.i(TAG, "loadSidecar id=$id url=${url.take(90)}")
-        api.fetchSidecar(id)
+        val sc = api.fetchSidecar(id) ?: return@withContext null
+
+        // Increment 2: point playback at the SERVER'S CACHED copy so the sidecar timestamps
+        // match the played bytes exactly (dissolves DAI — the live stream stitches ads at
+        // different offsets). Persisted; takes effect on the NEXT play of this episode.
+        val cached = api.cachedAudioUrl(id)
+        if (cached != null && episode is PodcastEpisode && episode.overrideStreamUrl != cached) {
+            episode.overrideStreamUrl = cached
+            episodeManager.update(episode)
+            Log.i(TAG, "set overrideStreamUrl -> cached copy (STOP + REPLAY to apply)")
+        }
+        sc
     }
 
     private companion object {
