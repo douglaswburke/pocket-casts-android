@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.parcelize)
@@ -12,6 +14,13 @@ sentry {
     projectName = project.findProperty("sentryAndroidProject")?.toString()
 }
 
+// SamPod server config, read from local.properties (gitignored). Blank if unset → ad-skip no-ops.
+val sampodProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun sampodProp(key: String): String = (sampodProps.getProperty(key) ?: "").trim()
+
 android {
     namespace = "au.com.shiftyjelly.pocketcasts"
 
@@ -19,6 +28,8 @@ android {
         applicationId = project.property("applicationId").toString()
         targetSdk = project.property("targetSdkVersion") as Int
         multiDexEnabled = true
+        buildConfigField("String", "SAMPOD_SERVER", "\"${sampodProp("sampod.server")}\"")
+        buildConfigField("String", "SAMPOD_TOKEN", "\"${sampodProp("sampod.token")}\"")
     }
 
     sourceSets {

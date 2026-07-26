@@ -168,6 +168,15 @@ class PocketCastsApplication :
 
         setupApp()
         cleanupDatabaseExportFileIfExists()
+
+        // SamPod ad-skip: observe playback + skip server-detected ad windows. No-op if unconfigured.
+        au.com.shiftyjelly.pocketcasts.sampod.SamPodSkipCoordinator(
+            playbackManager = playbackManager,
+            scope = applicationScope,
+            serverUrl = BuildConfig.SAMPOD_SERVER,
+            token = BuildConfig.SAMPOD_TOKEN,
+            moshi = moshi,
+        ).start()
     }
 
     private fun setupAnalytics() {
