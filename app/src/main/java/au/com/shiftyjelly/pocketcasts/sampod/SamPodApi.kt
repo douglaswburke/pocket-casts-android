@@ -27,10 +27,12 @@ class SamPodApi(
         val url = "$baseUrl/sampod/sidecar/$id".withToken() ?: return null
         return try {
             client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                android.util.Log.i("SamPod", "fetchSidecar http ${resp.code} for id=$id")
                 if (!resp.isSuccessful) return null
                 parse(resp.body.string(), id)
             }
         } catch (e: Exception) {
+            android.util.Log.w("SamPod", "fetchSidecar FAILED id=$id: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }

@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.sampod
 
+import android.util.Log
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import kotlinx.coroutines.CoroutineScope
@@ -32,7 +33,11 @@ class SamPodSkipCoordinator(
     private var sidecar: Sidecar? = null
 
     fun start() {
-        if (serverUrl.isBlank() || token.isBlank()) return
+        if (serverUrl.isBlank() || token.isBlank()) {
+            Log.w(TAG, "not configured (server/token blank) — ad-skip off")
+            return
+        }
+        Log.i(TAG, "started; server=$serverUrl")
         scope.launch {
             playbackManager.playbackStateFlow.collect { state ->
                 onState(state)
@@ -47,15 +52,26 @@ class SamPodSkipCoordinator(
             currentEpisodeUuid = uuid
             controller.reset()
             sidecar = loadSidecar()
+            Log.i(TAG, "episode=$uuid sidecar=${sidecar?.let { "${it.skips.size} ads" } ?: "NOT FOUND"}")
         }
         val skips = sidecar?.skips ?: return
         val decision = controller.check(state.positionMs, skips) ?: return
+        Log.i(TAG, "SKIP ${decision.ad.advertiser} at ${state.positionMs}ms -> seek ${decision.seekToMs}ms")
         playbackManager.seekToTimeMs(decision.seekToMs)
     }
 
     private suspend fun loadSidecar(): Sidecar? = withContext(Dispatchers.IO) {
-        val url = playbackManager.getCurrentEpisode()?.downloadUrl ?: return@withContext null
-        api.fetchSidecar(sha1Id(url))
+        val url = playbackManager.getCurrentEpisode()?.downloadUrl ?: run {
+            Log.w(TAG, "no downloadUrl for current episode")
+            return@withContext null
+        }
+        val id = sha1Id(url)
+        Log.i(TAG, "loadSidecar id=$id url=${url.take(90)}")
+        api.fetchSidecar(id)
+    }
+
+    private companion object {
+        const val TAG = "SamPod"
     }
 
     private fun sha1Id(input: String): String =
