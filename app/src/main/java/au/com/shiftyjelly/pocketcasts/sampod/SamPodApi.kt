@@ -1,45 +1,34 @@
 package au.com.shiftyjelly.pocketcasts.sampod
 
-import com.squareup.moshi.Moshi
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
  * Thin client for the SamPod ingest server (tailnet-hosted, token-gated). Fetches the
- * skip-sidecar for a queued episode and builds the cached-audio URL that the player should
- * stream (set as BaseEpisode.overrideStreamUrl so the played bytes match the sidecar).
+ * skip-sidecar for a queued episode and builds the cached-audio URL that the player can
+ * stream (BaseEpisode.overrideStreamUrl, increment 2) so the played bytes match the sidecar.
  *
- * Uses OkHttp + Moshi (both already Pocket Casts deps). Base URL + token come from
- * BuildConfig (populated from local.properties, gitignored) — see SAMPOD_INTEGRATION.md.
- * The server id for an episode = the SamPod queue id (server derives it from the enclosure
- * URL as sha1[:16]); the app can also resolve by asking the server, but the simplest path is
- * to queue via the server and store the returned id on the episode.
- *
- * ⚠️ Not yet compile-verified (authored on a headless host). Kept dependency-light and
- * self-contained; if the `app` module lacks okhttp/moshi transitively, add them (they exist
- * elsewhere in the tree). See the integration doc.
+ * Parses with org.json (built into Android) — no Moshi, no codegen (see Sidecar.kt).
+ * Base URL + token come from BuildConfig (local.properties, gitignored).
  */
 class SamPodApi(
-    private val baseUrl: String,   // e.g. https://<mini-tailnet>:8848  (no trailing slash)
+    private val baseUrl: String,   // e.g. http://<mini-tailnet>:8848  (no trailing slash)
     private val token: String,     // ?k= gate
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build(),
-    moshi: Moshi = Moshi.Builder().build(),
 ) {
-    private val sidecarAdapter = moshi.adapter(Sidecar::class.java)
-
     /** GET /sampod/sidecar/<id> → Sidecar, or null on 404 / error. Blocking; call off-main. */
     fun fetchSidecar(id: String): Sidecar? {
         val url = "$baseUrl/sampod/sidecar/$id".withToken() ?: return null
         return try {
             client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                 if (!resp.isSuccessful) return null
-                // OkHttp 5: ResponseBody is non-null → no safe-call (warnings-as-errors).
-                sidecarAdapter.fromJson(resp.body.string())
+                parse(resp.body.string(), id)
             }
         } catch (e: Exception) {
             null
@@ -47,8 +36,37 @@ class SamPodApi(
     }
 
     /** The playback URL for the server's cached copy → set as episode.overrideStreamUrl. */
-    fun cachedAudioUrl(id: String): String? =
-        "$baseUrl/sampod/audio/$id".withToken()
+    fun cachedAudioUrl(id: String): String? = "$baseUrl/sampod/audio/$id".withToken()
+
+    private fun parse(json: String, fallbackId: String): Sidecar? = try {
+        val o = JSONObject(json)
+        val arr = o.optJSONArray("skips")
+        val skips = ArrayList<AdSkip>()
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val s = arr.getJSONObject(i)
+                skips.add(
+                    AdSkip(
+                        startS = s.optDouble("start_s", 0.0),
+                        endS = s.optDouble("end_s", 0.0),
+                        advertiser = s.optString("advertiser", "ad"),
+                        type = s.optString("type", "sponsor"),
+                        confidence = s.optDouble("confidence", 1.0),
+                    ),
+                )
+            }
+        }
+        Sidecar(
+            id = o.optString("id", fallbackId),
+            episodeTitle = o.optString("episode_title", ""),
+            feedTitle = o.optString("feed_title", ""),
+            audioUrl = o.optString("audio_url", ""),
+            durationS = o.optDouble("duration_s", 0.0),
+            skips = skips,
+        )
+    } catch (e: Exception) {
+        null
+    }
 
     private fun String.withToken(): String? {
         val http = this.toHttpUrlOrNull() ?: return null

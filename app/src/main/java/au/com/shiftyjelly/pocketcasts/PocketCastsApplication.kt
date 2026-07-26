@@ -169,14 +169,18 @@ class PocketCastsApplication :
         setupApp()
         cleanupDatabaseExportFileIfExists()
 
-        // SamPod ad-skip: observe playback + skip server-detected ad windows. No-op if unconfigured.
-        au.com.shiftyjelly.pocketcasts.sampod.SamPodSkipCoordinator(
-            playbackManager = playbackManager,
-            scope = applicationScope,
-            serverUrl = BuildConfig.SAMPOD_SERVER,
-            token = BuildConfig.SAMPOD_TOKEN,
-            moshi = moshi,
-        ).start()
+        // SamPod ad-skip: observe playback + skip server-detected ad windows. No-op if
+        // unconfigured. Guarded so a SamPod failure can NEVER crash the host app.
+        try {
+            au.com.shiftyjelly.pocketcasts.sampod.SamPodSkipCoordinator(
+                playbackManager = playbackManager,
+                scope = applicationScope,
+                serverUrl = BuildConfig.SAMPOD_SERVER,
+                token = BuildConfig.SAMPOD_TOKEN,
+            ).start()
+        } catch (e: Throwable) {
+            android.util.Log.e("SamPod", "ad-skip init failed", e)
+        }
     }
 
     private fun setupAnalytics() {

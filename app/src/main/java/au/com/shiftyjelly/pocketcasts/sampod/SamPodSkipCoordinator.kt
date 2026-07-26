@@ -2,7 +2,6 @@ package au.com.shiftyjelly.pocketcasts.sampod
 
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
-import com.squareup.moshi.Moshi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -26,9 +25,8 @@ class SamPodSkipCoordinator(
     private val scope: CoroutineScope,
     private val serverUrl: String,
     private val token: String,
-    moshi: Moshi,
 ) {
-    private val api = SamPodApi(baseUrl = serverUrl.trimEnd('/'), token = token, moshi = moshi)
+    private val api = SamPodApi(baseUrl = serverUrl.trimEnd('/'), token = token)
     private val controller = AdSkipController()
     private var currentEpisodeUuid: String? = null
     private var sidecar: Sidecar? = null
