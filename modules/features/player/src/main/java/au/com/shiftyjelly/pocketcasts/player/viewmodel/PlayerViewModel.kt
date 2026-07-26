@@ -86,6 +86,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.rx2.asObservable
 import kotlinx.coroutines.withContext
 import android.widget.Toast
+import au.com.shiftyjelly.pocketcasts.player.BuildConfig
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
@@ -537,8 +539,17 @@ class PlayerViewModel @Inject constructor(
     private var lastMarkAtMs = 0L
 
     fun onMarkAdClick() {
-        val currentUuid = playbackManager.getCurrentEpisode()?.uuid ?: run {
+        // overrideStreamUrl is @Ignore (in-memory only) so the button can't rely on it; instead
+        // compute the SamPod id from the persisted downloadUrl (== how the server keys episodes)
+        // and read server/token from BuildConfig. Independent of the override entirely.
+        val url = (playbackManager.getCurrentEpisode() as? PodcastEpisode)?.downloadUrl ?: run {
             Toast.makeText(context, "Nothing playing", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val server = BuildConfig.SAMPOD_SERVER.trimEnd('/')
+        val token = BuildConfig.SAMPOD_TOKEN
+        if (server.isBlank() || token.isBlank()) {
+            Toast.makeText(context, "SamPod not configured", Toast.LENGTH_SHORT).show()
             return
         }
         // Debounce: each tap fires a server-side re-analysis (slow); rapid taps flooded it → timeouts.
@@ -546,41 +557,31 @@ class PlayerViewModel @Inject constructor(
         if (now - lastMarkAtMs < 4000) return
         lastMarkAtMs = now
         val posMs = playbackManager.playbackStateRelay.blockingFirst().positionMs // BehaviorRelay → instant
+        val id = sampodId(url)
 
-        viewModelScope.launch {
-            // Re-fetch FRESH from the DB: the in-memory getCurrentEpisode() copy can lag the
-            // persisted overrideStreamUrl (queue-prep/loadSidecar wrote it via episodeManager.update).
-            val episode = episodeManager.findByUuid(currentUuid)
-            val override = episode?.overrideStreamUrl
-            if (override == null || !override.contains("/sampod/audio/")) {
-                android.util.Log.w("SamPod", "mark-ad no-op: override=${override ?: "null"} uuid=$currentUuid")
-                Toast.makeText(context, "No SamPod ad-data for this episode", Toast.LENGTH_SHORT).show()
-                return@launch
-            }
-            val marker = "/sampod/audio/"
-            val idx = override.indexOf(marker)
-            val base = override.substring(0, idx)
-            val id = override.substring(idx + marker.length).substringBefore("?")
-            val token = override.substringAfter("k=", "").substringBefore("&")
-
-            Toast.makeText(context, "Ad marked at ${posMs / 1000}s — re-analyzing…", Toast.LENGTH_SHORT).show()
-            withContext(Dispatchers.IO) {
-                try {
-                    val payload = "{\"id\":\"$id\",\"timestamp\":${posMs / 1000.0}}"
-                    val req = Request.Builder()
-                        .url("$base/sampod/relearn?k=$token")
-                        .post(payload.toRequestBody("application/json".toMediaTypeOrNull()))
-                        .build()
-                    val client = OkHttpClient.Builder().callTimeout(35, TimeUnit.SECONDS).build()
-                    client.newCall(req).execute().use { resp ->
-                        android.util.Log.i("SamPod", "mark-ad POST ${resp.code} at ${posMs}ms id=$id")
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.w("SamPod", "mark-ad failed: ${e.message}")
+        Toast.makeText(context, "Ad marked at ${posMs / 1000}s — re-analyzing…", Toast.LENGTH_SHORT).show()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val payload = "{\"id\":\"$id\",\"timestamp\":${posMs / 1000.0}}"
+                val req = Request.Builder()
+                    .url("$server/sampod/relearn?k=$token")
+                    .post(payload.toRequestBody("application/json".toMediaTypeOrNull()))
+                    .build()
+                val client = OkHttpClient.Builder().callTimeout(35, TimeUnit.SECONDS).build()
+                client.newCall(req).execute().use { resp ->
+                    android.util.Log.i("SamPod", "mark-ad POST ${resp.code} at ${posMs}ms id=$id")
                 }
+            } catch (e: Exception) {
+                android.util.Log.w("SamPod", "mark-ad failed: ${e.message}")
             }
         }
     }
+
+    private fun sampodId(input: String): String =
+        MessageDigest.getInstance("SHA-1")
+            .digest(input.toByteArray())
+            .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+            .take(16)
 
     fun onSkipForwardLongClick() {
         viewModelScope.launch {
