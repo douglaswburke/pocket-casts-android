@@ -85,6 +85,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.rx2.asObservable
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl
 import timber.log.Timber
 import au.com.shiftyjelly.pocketcasts.localization.R as LR
@@ -519,6 +523,39 @@ class PlayerViewModel @Inject constructor(
 
     fun onSkipForwardClick() {
         playbackManager.skipForward(sourceView = source, jumpAmountSeconds = settings.skipForwardInSecs.value)
+    }
+
+    /**
+     * SamPod mark-a-miss: tell the server there's an ad at the current playhead so it re-analyzes
+     * that window and extends the sidecar (the learning loop). Self-contained — derives the SamPod
+     * server, episode id, and token straight from the episode's overrideStreamUrl the coordinator
+     * already set (http://server/sampod/audio/<id>?k=<token>), so no cross-module deps. No-op if
+     * the current episode isn't SamPod-backed.
+     */
+    fun onMarkAdClick() {
+        val episode = playbackManager.getCurrentEpisode() as? PodcastEpisode ?: return
+        val override = episode.overrideStreamUrl ?: return
+        val marker = "/sampod/audio/"
+        val idx = override.indexOf(marker)
+        if (idx < 0) return
+        val base = override.substring(0, idx)
+        val id = override.substring(idx + marker.length).substringBefore("?")
+        val token = override.substringAfter("k=", "").substringBefore("&")
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val posMs = playbackManager.playbackStateRelay.blockingFirst().positionMs
+                val payload = "{\"id\":\"$id\",\"timestamp\":${posMs / 1000.0}}"
+                val req = Request.Builder()
+                    .url("$base/sampod/relearn?k=$token")
+                    .post(payload.toRequestBody("application/json".toMediaTypeOrNull()))
+                    .build()
+                OkHttpClient().newCall(req).execute().use { resp ->
+                    android.util.Log.i("SamPod", "mark-ad POST ${resp.code} at ${posMs}ms id=$id")
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("SamPod", "mark-ad failed: ${e.message}")
+            }
+        }
     }
 
     fun onSkipForwardLongClick() {

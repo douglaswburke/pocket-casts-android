@@ -9,7 +9,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.Icon
+import androidx.compose.material.IconButton
 import androidx.compose.material.LocalRippleConfiguration
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.RippleConfiguration
 import androidx.compose.material.RippleDefaults
@@ -80,6 +84,7 @@ fun PlayerControls(
         onSkipForwardClick = { playerViewModel.onSkipForwardClick() },
         onSkipBackClick = { playerViewModel.onSkipBackwardClick() },
         onSkipForwardLongPress = { playerViewModel.onSkipForwardLongClick() },
+        onMarkAdClick = { playerViewModel.onMarkAdClick() },
         modifier = modifier,
     )
 }
@@ -92,6 +97,7 @@ private fun Content(
     onSkipForwardClick: () -> Unit,
     onSkipBackClick: () -> Unit,
     onSkipForwardLongPress: () -> Unit,
+    onMarkAdClick: () -> Unit,
     modifier: Modifier = Modifier,
     playerColors: PlayerColors = MaterialTheme.theme.rememberPlayerColorsOrDefault(),
 ) {
@@ -100,6 +106,15 @@ private fun Content(
         horizontalArrangement = Arrangement.SpaceAround,
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // SamPod: mark a missed ad at the current playhead (learning loop).
+        IconButton(onClick = onMarkAdClick) {
+            Icon(
+                imageVector = Icons.Default.Warning,
+                contentDescription = "Mark ad",
+                tint = playerColors.contrast01,
+            )
+        }
+
         SkipButton(
             skipDuration = playerControlsData.skipBackInSecs,
             contentDescription = stringResource(LR.string.skip_back),
@@ -218,6 +233,7 @@ private fun PlayerControlsPreview(
             onSkipForwardClick = {},
             onSkipBackClick = {},
             onSkipForwardLongPress = {},
+            onMarkAdClick = {},
         )
     }
 }
