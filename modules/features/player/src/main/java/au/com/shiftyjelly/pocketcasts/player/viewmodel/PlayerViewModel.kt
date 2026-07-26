@@ -537,38 +537,47 @@ class PlayerViewModel @Inject constructor(
     private var lastMarkAtMs = 0L
 
     fun onMarkAdClick() {
-        val episode = playbackManager.getCurrentEpisode() as? PodcastEpisode
-        val override = episode?.overrideStreamUrl
-        if (override == null || !override.contains("/sampod/audio/")) {
-            Toast.makeText(context, "No SamPod ad-data for this episode", Toast.LENGTH_SHORT).show()
+        val currentUuid = playbackManager.getCurrentEpisode()?.uuid ?: run {
+            Toast.makeText(context, "Nothing playing", Toast.LENGTH_SHORT).show()
             return
         }
         // Debounce: each tap fires a server-side re-analysis (slow); rapid taps flooded it → timeouts.
         val now = System.currentTimeMillis()
         if (now - lastMarkAtMs < 4000) return
         lastMarkAtMs = now
-
-        val marker = "/sampod/audio/"
-        val idx = override.indexOf(marker)
-        val base = override.substring(0, idx)
-        val id = override.substring(idx + marker.length).substringBefore("?")
-        val token = override.substringAfter("k=", "").substringBefore("&")
         val posMs = playbackManager.playbackStateRelay.blockingFirst().positionMs // BehaviorRelay → instant
 
-        Toast.makeText(context, "Ad marked at ${posMs / 1000}s — re-analyzing…", Toast.LENGTH_SHORT).show()
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val payload = "{\"id\":\"$id\",\"timestamp\":${posMs / 1000.0}}"
-                val req = Request.Builder()
-                    .url("$base/sampod/relearn?k=$token")
-                    .post(payload.toRequestBody("application/json".toMediaTypeOrNull()))
-                    .build()
-                val client = OkHttpClient.Builder().callTimeout(35, TimeUnit.SECONDS).build()
-                client.newCall(req).execute().use { resp ->
-                    android.util.Log.i("SamPod", "mark-ad POST ${resp.code} at ${posMs}ms id=$id")
+        viewModelScope.launch {
+            // Re-fetch FRESH from the DB: the in-memory getCurrentEpisode() copy can lag the
+            // persisted overrideStreamUrl (queue-prep/loadSidecar wrote it via episodeManager.update).
+            val episode = episodeManager.findByUuid(currentUuid)
+            val override = episode?.overrideStreamUrl
+            if (override == null || !override.contains("/sampod/audio/")) {
+                android.util.Log.w("SamPod", "mark-ad no-op: override=${override ?: "null"} uuid=$currentUuid")
+                Toast.makeText(context, "No SamPod ad-data for this episode", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            val marker = "/sampod/audio/"
+            val idx = override.indexOf(marker)
+            val base = override.substring(0, idx)
+            val id = override.substring(idx + marker.length).substringBefore("?")
+            val token = override.substringAfter("k=", "").substringBefore("&")
+
+            Toast.makeText(context, "Ad marked at ${posMs / 1000}s — re-analyzing…", Toast.LENGTH_SHORT).show()
+            withContext(Dispatchers.IO) {
+                try {
+                    val payload = "{\"id\":\"$id\",\"timestamp\":${posMs / 1000.0}}"
+                    val req = Request.Builder()
+                        .url("$base/sampod/relearn?k=$token")
+                        .post(payload.toRequestBody("application/json".toMediaTypeOrNull()))
+                        .build()
+                    val client = OkHttpClient.Builder().callTimeout(35, TimeUnit.SECONDS).build()
+                    client.newCall(req).execute().use { resp ->
+                        android.util.Log.i("SamPod", "mark-ad POST ${resp.code} at ${posMs}ms id=$id")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("SamPod", "mark-ad failed: ${e.message}")
                 }
-            } catch (e: Exception) {
-                android.util.Log.w("SamPod", "mark-ad failed: ${e.message}")
             }
         }
     }
