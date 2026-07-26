@@ -85,6 +85,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.rx2.asObservable
 import kotlinx.coroutines.withContext
+import android.widget.Toast
+import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -532,24 +534,37 @@ class PlayerViewModel @Inject constructor(
      * already set (http://server/sampod/audio/<id>?k=<token>), so no cross-module deps. No-op if
      * the current episode isn't SamPod-backed.
      */
+    private var lastMarkAtMs = 0L
+
     fun onMarkAdClick() {
-        val episode = playbackManager.getCurrentEpisode() as? PodcastEpisode ?: return
-        val override = episode.overrideStreamUrl ?: return
+        val episode = playbackManager.getCurrentEpisode() as? PodcastEpisode
+        val override = episode?.overrideStreamUrl
+        if (override == null || !override.contains("/sampod/audio/")) {
+            Toast.makeText(context, "No SamPod ad-data for this episode", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Debounce: each tap fires a server-side re-analysis (slow); rapid taps flooded it → timeouts.
+        val now = System.currentTimeMillis()
+        if (now - lastMarkAtMs < 4000) return
+        lastMarkAtMs = now
+
         val marker = "/sampod/audio/"
         val idx = override.indexOf(marker)
-        if (idx < 0) return
         val base = override.substring(0, idx)
         val id = override.substring(idx + marker.length).substringBefore("?")
         val token = override.substringAfter("k=", "").substringBefore("&")
+        val posMs = playbackManager.playbackStateRelay.blockingFirst().positionMs // BehaviorRelay → instant
+
+        Toast.makeText(context, "Ad marked at ${posMs / 1000}s — re-analyzing…", Toast.LENGTH_SHORT).show()
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val posMs = playbackManager.playbackStateRelay.blockingFirst().positionMs
                 val payload = "{\"id\":\"$id\",\"timestamp\":${posMs / 1000.0}}"
                 val req = Request.Builder()
                     .url("$base/sampod/relearn?k=$token")
                     .post(payload.toRequestBody("application/json".toMediaTypeOrNull()))
                     .build()
-                OkHttpClient().newCall(req).execute().use { resp ->
+                val client = OkHttpClient.Builder().callTimeout(35, TimeUnit.SECONDS).build()
+                client.newCall(req).execute().use { resp ->
                     android.util.Log.i("SamPod", "mark-ad POST ${resp.code} at ${posMs}ms id=$id")
                 }
             } catch (e: Exception) {
