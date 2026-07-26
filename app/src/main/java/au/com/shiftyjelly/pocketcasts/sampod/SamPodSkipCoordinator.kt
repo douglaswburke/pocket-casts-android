@@ -8,6 +8,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.rx2.asFlow
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 
@@ -34,6 +35,7 @@ class SamPodSkipCoordinator(
     private val controller = AdSkipController()
     private var currentEpisodeUuid: String? = null
     private var sidecar: Sidecar? = null
+    private val prepared = mutableSetOf<String>()
 
     fun start() {
         if (serverUrl.isBlank() || token.isBlank()) {
@@ -45,6 +47,31 @@ class SamPodSkipCoordinator(
             playbackManager.playbackStateFlow.collect { state ->
                 onState(state)
             }
+        }
+        // Increment 3 (P2): set the cached-copy override for QUEUED episodes before they play,
+        // so ad-skip works from the first play with NO stop+replay dance.
+        scope.launch {
+            playbackManager.upNextQueue.changesObservable.asFlow().collect {
+                prepareQueue()
+            }
+        }
+    }
+
+    /** For every episode in Up Next that has a server sidecar, point it at the cached copy
+     *  (once). Runs off-main on each queue change. */
+    private suspend fun prepareQueue() = withContext(Dispatchers.IO) {
+        for (episode in playbackManager.upNextQueue.allEpisodes) {
+            if (episode !is PodcastEpisode) continue
+            if (episode.uuid in prepared) continue
+            prepared.add(episode.uuid) // check each queued episode at most once
+            if (episode.overrideStreamUrl != null) continue // don't clobber an existing override
+            val url = episode.downloadUrl ?: continue
+            val id = sha1Id(url)
+            val sc = api.fetchSidecar(id) ?: continue // only override episodes we can actually skip
+            val cached = api.cachedAudioUrl(id) ?: continue
+            episode.overrideStreamUrl = cached
+            episodeManager.update(episode)
+            Log.i(TAG, "queue-prep: overrideStreamUrl set for ${episode.uuid} (${sc.skips.size} ads)")
         }
     }
 
@@ -83,7 +110,7 @@ class SamPodSkipCoordinator(
         if (cached != null && episode is PodcastEpisode && episode.overrideStreamUrl != cached) {
             episode.overrideStreamUrl = cached
             episodeManager.update(episode)
-            Log.i(TAG, "set overrideStreamUrl -> cached copy (STOP + REPLAY to apply)")
+            Log.i(TAG, "set overrideStreamUrl -> cached copy (play-time fallback; queue-prep normally does this first)")
         }
         sc
     }
