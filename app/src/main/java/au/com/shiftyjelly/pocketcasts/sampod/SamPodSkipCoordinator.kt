@@ -133,7 +133,15 @@ class SamPodSkipCoordinator(
                 for (waitMs in POLL_BACKOFF_MS) {
                     delay(waitMs)
                     val sc = api.fetchSidecar(id) ?: continue
-                    prepared.add(episode.uuid)
+                    // `add` returns false if prepareQueue() already claimed this episode —
+                    // it re-scans on every Up Next change and can find the finished sidecar
+                    // seconds before the poller's next tick, which wrote the same override
+                    // twice (observed in the 2026-07-30 first live run: harmless, identical
+                    // value, but a redundant DB write). Whoever claims it does the attach.
+                    if (!prepared.add(episode.uuid)) {
+                        Log.i(TAG, "auto-queue: ready — already attached by queue-prep")
+                        return@launch
+                    }
                     // Re-read the episode before writing. The copy captured when this poller
                     // started can be many minutes stale by now — Doug may have listened to
                     // part of it meanwhile — and persisting the old row would roll back
