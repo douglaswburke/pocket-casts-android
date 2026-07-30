@@ -30,6 +30,14 @@ android {
         multiDexEnabled = true
         buildConfigField("String", "SAMPOD_SERVER", "\"${sampodProp("sampod.server")}\"")
         buildConfigField("String", "SAMPOD_TOKEN", "\"${sampodProp("sampod.token")}\"")
+        // Auto-queue: adding to Up Next asks the server to analyze unseen episodes. Metered
+        // (Deepgram ASR), so it gets an off switch that needs no code change — set
+        // `sampod.autoqueue=false` in local.properties. Defaults ON when unset.
+        buildConfigField(
+            "boolean",
+            "SAMPOD_AUTOQUEUE",
+            (sampodProp("sampod.autoqueue").lowercase() != "false").toString(),
+        )
     }
 
     sourceSets {

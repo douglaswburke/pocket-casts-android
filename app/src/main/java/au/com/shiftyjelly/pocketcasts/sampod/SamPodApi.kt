@@ -1,8 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.sampod
 
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
@@ -40,6 +42,41 @@ class SamPodApi(
     /** The playback URL for the server's cached copy → set as episode.overrideStreamUrl. */
     fun cachedAudioUrl(id: String): String? = "$baseUrl/sampod/audio/$id".withToken()
 
+    /**
+     * POST /sampod/queue → ask the server to download + analyze this episode.
+     *
+     * Returns the server's status string ("queued" / "processing" / "ready" / "deferred"),
+     * or null if the call failed. Safe to call repeatedly: the server keys episodes by
+     * sha1(audio_url) and returns the existing entry rather than re-processing — and, since
+     * the daily spend cap sits behind the transcript cache, re-queueing something already
+     * analyzed costs nothing at all.
+     *
+     * Blocking; call off-main.
+     */
+    fun queueEpisode(audioUrl: String, episodeTitle: String, feedTitle: String): String? {
+        val url = "$baseUrl/sampod/queue".withToken() ?: return null
+        val payload = JSONObject()
+            .put("audio_url", audioUrl)
+            .put("episode_title", episodeTitle)
+            .put("feed_title", feedTitle)
+            .put("source", "app-autoqueue")
+            .toString()
+        return try {
+            val req = Request.Builder().url(url)
+                .post(payload.toRequestBody(JSON_MEDIA))
+                .build()
+            client.newCall(req).execute().use { resp ->
+                val body = resp.body.string()
+                android.util.Log.i("SamPod", "queueEpisode http ${resp.code}: ${body.take(160)}")
+                if (!resp.isSuccessful) return null
+                JSONObject(body).optString("status", "queued")
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("SamPod", "queueEpisode FAILED: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+    }
+
     private fun parse(json: String, fallbackId: String): Sidecar? = try {
         val o = JSONObject(json)
         val arr = o.optJSONArray("skips")
@@ -73,5 +110,9 @@ class SamPodApi(
     private fun String.withToken(): String? {
         val http = this.toHttpUrlOrNull() ?: return null
         return http.newBuilder().addQueryParameter("k", token).build().toString()
+    }
+
+    private companion object {
+        val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
     }
 }

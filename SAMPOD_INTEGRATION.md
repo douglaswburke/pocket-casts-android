@@ -31,6 +31,21 @@ the tree, e.g. `modules/services/servers`).
 (gitignored) into `BuildConfig` (same pattern as the custom MVP). Then:
 `SamPodApi(BuildConfig.SAMPOD_SERVER, BuildConfig.SAMPOD_TOKEN)`.
 
+**`sampod.autoqueue`** (optional, defaults ON). Adding an episode to Up Next asks the
+server to analyze it when no sidecar exists yet — this is what makes "hit queue" start the
+pipeline. It is the only app action that can spend money (Deepgram ASR), so it has an off
+switch that needs no code change:
+
+```properties
+sampod.autoqueue=false   # in local.properties; anything else (or unset) = ON
+```
+
+Cost in practice is usually zero: the nightly ingest has normally already analyzed new
+episodes of subscribed shows, and re-queueing an analyzed episode is free. Spending only
+happens for back-catalog or off-feed episodes, and is bounded server-side by a daily
+audio-hour cap (`SAMPOD_DAILY_AUDIO_HOUR_CAP`, default 12h ≈ $3.12/day). Over the cap the
+server returns `deferred` — the episode retries automatically rather than failing.
+
 ### 2. Play the CACHED copy — the DAI-dissolver (one field, already supported)
 Pocket Casts already has the exact hook: `BaseEpisode.overrideStreamUrl`
 (`modules/services/model/.../entity/BaseEpisode.kt:152` → `get() = overrideStreamUrl ?: downloadUrl`).

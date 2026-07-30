@@ -178,6 +178,8 @@ class PocketCastsApplication :
                 serverUrl = BuildConfig.SAMPOD_SERVER,
                 token = BuildConfig.SAMPOD_TOKEN,
                 episodeManager = episodeManager,
+                podcastManager = podcastManager,
+                autoQueue = BuildConfig.SAMPOD_AUTOQUEUE,
             ).start()
         } catch (e: Throwable) {
             android.util.Log.e("SamPod", "ad-skip init failed", e)

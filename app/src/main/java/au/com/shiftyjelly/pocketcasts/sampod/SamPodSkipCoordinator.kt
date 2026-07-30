@@ -5,12 +5,15 @@ import au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
+import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.rx2.asFlow
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * SamPod ad-skip — wired into the Pocket Casts player WITHOUT editing PlaybackManager.
@@ -23,6 +26,12 @@ import java.security.MessageDigest
  * Increment 1 (2026-07-26): skip only. Works on static-ad episodes where the enclosure bytes ==
  * the bytes the detector analyzed. Increment 2 adds BaseEpisode.overrideStreamUrl (play the
  * server's cached copy) so DAI episodes match too, and the timeline ad-bars + ±10/30 UI.
+ *
+ * Increment 4 (2026-07-30): AUTO-QUEUE. Adding an episode to Up Next now asks the server to
+ * analyze it if it hasn't been already, instead of silently giving up — "hit queue" is the
+ * one gesture that starts the whole SamPod pipeline. Most episodes are already analyzed by
+ * the nightly ingest, so this normally costs nothing; the server's daily spend cap bounds
+ * the cases where it doesn't.
  */
 class SamPodSkipCoordinator(
     private val playbackManager: PlaybackManager,
@@ -30,12 +39,22 @@ class SamPodSkipCoordinator(
     private val serverUrl: String,
     private val token: String,
     private val episodeManager: EpisodeManager,
+    private val podcastManager: PodcastManager? = null,
+    private val autoQueue: Boolean = true,
 ) {
     private val api = SamPodApi(baseUrl = serverUrl.trimEnd('/'), token = token)
     private val controller = AdSkipController()
-    private var currentEpisodeUuid: String? = null
-    private var sidecar: Sidecar? = null
-    private val prepared = mutableSetOf<String>()
+    // @Volatile: an analysis poller on one IO thread may adopt a just-ready sidecar while
+    // the playback collector reads these on another.
+    @Volatile private var currentEpisodeUuid: String? = null
+
+    @Volatile private var sidecar: Sidecar? = null
+    // Concurrent sets, not plain ones: prepareQueue() runs on the IO dispatcher and each
+    // analysis poller is its own IO coroutine, so both are touched from several threads.
+    private val prepared: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Episodes we've asked the server to analyze, so one queue-add starts one poller. */
+    private val awaitingAnalysis: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     fun start() {
         if (serverUrl.isBlank() || token.isBlank()) {
@@ -58,20 +77,89 @@ class SamPodSkipCoordinator(
     }
 
     /** For every episode in Up Next that has a server sidecar, point it at the cached copy
-     *  (once). Runs off-main on each queue change. */
+     *  (once). Episodes with no sidecar are handed to the server for analysis. Runs off-main
+     *  on each queue change. */
     private suspend fun prepareQueue() = withContext(Dispatchers.IO) {
         for (episode in playbackManager.upNextQueue.allEpisodes) {
             if (episode !is PodcastEpisode) continue
             if (episode.uuid in prepared) continue
-            prepared.add(episode.uuid) // check each queued episode at most once
-            if (episode.overrideStreamUrl != null) continue // don't clobber an existing override
+            if (episode.overrideStreamUrl != null) {
+                prepared.add(episode.uuid) // already wired up; nothing left to do
+                continue
+            }
             val url = episode.downloadUrl ?: continue
             val id = sha1Id(url)
-            val sc = api.fetchSidecar(id) ?: continue // only override episodes we can actually skip
-            val cached = api.cachedAudioUrl(id) ?: continue
-            episode.overrideStreamUrl = cached
-            episodeManager.update(episode)
-            Log.i(TAG, "queue-prep: overrideStreamUrl set for ${episode.uuid} (${sc.skips.size} ads)")
+            val sc = api.fetchSidecar(id)
+            if (sc != null) {
+                prepared.add(episode.uuid) // resolved — don't look at it again
+                attachCachedCopy(episode, id, sc)
+            } else if (autoQueue) {
+                // The gap this increment closes: before, a missing sidecar ended here and the
+                // episode was simply un-skippable forever. Deliberately NOT added to
+                // `prepared` — analysis takes minutes, and marking it done would mean never
+                // re-checking. `awaitingAnalysis` is what keeps this to one poller each.
+                requestAnalysis(episode, id, url)
+            }
+        }
+    }
+
+    private suspend fun attachCachedCopy(episode: PodcastEpisode, id: String, sc: Sidecar) {
+        val cached = api.cachedAudioUrl(id) ?: return
+        episode.overrideStreamUrl = cached
+        episodeManager.update(episode)
+        Log.i(TAG, "queue-prep: overrideStreamUrl set for ${episode.uuid} (${sc.skips.size} ads)")
+    }
+
+    /**
+     * Ask the server to analyze a queued episode, then poll until its sidecar appears.
+     *
+     * Backoff rather than a fixed interval because processing time scales with episode
+     * length — a 20-minute show is ready in ~2 min, a 2-hour Ferriss episode takes ~10 —
+     * and a fixed short poll would just hammer the tailnet for the long ones. Gives up after
+     * ~30 min of wall-clock; the next Up Next change re-checks from scratch, and the episode
+     * simply plays with ads in the meantime rather than failing.
+     */
+    private fun requestAnalysis(episode: PodcastEpisode, id: String, url: String) {
+        if (!awaitingAnalysis.add(episode.uuid)) return // a poller is already on this one
+        scope.launch(Dispatchers.IO) {
+            try {
+                val feed = podcastManager?.findPodcastByUuid(episode.podcastUuid)?.title ?: ""
+                val status = api.queueEpisode(url, episode.title, feed)
+                if (status == null) {
+                    Log.w(TAG, "auto-queue: server unreachable for ${episode.title.take(40)}")
+                    return@launch
+                }
+                Log.i(TAG, "auto-queue: '${episode.title.take(40)}' -> $status")
+                for (waitMs in POLL_BACKOFF_MS) {
+                    delay(waitMs)
+                    val sc = api.fetchSidecar(id) ?: continue
+                    prepared.add(episode.uuid)
+                    // Re-read the episode before writing. The copy captured when this poller
+                    // started can be many minutes stale by now — Doug may have listened to
+                    // part of it meanwhile — and persisting the old row would roll back
+                    // playedUpTo. Only the fresh entity is safe to update.
+                    val fresh = episodeManager.findEpisodeByUuid(episode.uuid) as? PodcastEpisode
+                    if (fresh == null) {
+                        Log.w(TAG, "auto-queue: episode ${episode.uuid} vanished before attach")
+                        return@launch
+                    }
+                    attachCachedCopy(fresh, id, sc)
+                    Log.i(TAG, "auto-queue: ready — ${sc.skips.size} ad(s) in '${episode.title.take(40)}'")
+                    // If this is the episode playing right now, adopt the sidecar live so the
+                    // skips take effect without waiting for the next episode change.
+                    if (currentEpisodeUuid == episode.uuid) {
+                        sidecar = sc
+                        controller.reset()
+                    }
+                    return@launch
+                }
+                Log.w(TAG, "auto-queue: gave up waiting on '${episode.title.take(40)}' " +
+                    "(still processing, deferred by the spend cap, or failed server-side)")
+            } catch (e: Exception) {
+                Log.w(TAG, "auto-queue FAILED: ${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                awaitingAnalysis.remove(episode.uuid)
+            }
         }
     }
 
@@ -117,6 +205,12 @@ class SamPodSkipCoordinator(
 
     private companion object {
         const val TAG = "SamPod"
+
+        /** ~30 min total: quick early checks for short shows, patient later ones for long. */
+        val POLL_BACKOFF_MS = longArrayOf(
+            30_000, 30_000, 60_000, 60_000, 120_000, 120_000,
+            300_000, 300_000, 300_000, 300_000,
+        )
     }
 
     private fun sha1Id(input: String): String =
