@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.ksp)
@@ -6,12 +8,23 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+// SamPod server config from local.properties (gitignored). Blank if unset → no badge.
+val sampodProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun sampodProp(key: String): String = (sampodProps.getProperty(key) ?: "").trim()
+
 android {
     namespace = "au.com.shiftyjelly.pocketcasts.podcasts"
     buildFeatures {
         buildConfig = true
         viewBinding = true
         compose = true
+    }
+    defaultConfig {
+        buildConfigField("String", "SAMPOD_SERVER", "\"${sampodProp("sampod.server")}\"")
+        buildConfigField("String", "SAMPOD_TOKEN", "\"${sampodProp("sampod.token")}\"")
     }
 }
 
@@ -56,6 +69,7 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
+    implementation(libs.okhttp)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.rx2)

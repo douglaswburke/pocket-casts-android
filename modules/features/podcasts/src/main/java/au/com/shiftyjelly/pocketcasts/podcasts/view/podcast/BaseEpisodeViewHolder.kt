@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.podcasts.view.podcast
 
 import android.content.res.ColorStateList
+import android.text.TextUtils
 import android.transition.AutoTransition
 import android.transition.TransitionManager
 import android.view.View
@@ -201,7 +202,18 @@ abstract class BaseEpisodeViewHolder<T : Any>(
     }
 
     private fun bindDate() {
-        binding.date.text = episode.getSummaryText(dateFormatter, tint, showDuration = false, context)
+        val summary = episode.getSummaryText(dateFormatter, tint, showDuration = false, context)
+        // SamPod: mark episodes that already have a skip-sidecar. Appended to the existing
+        // summary line rather than added as a view, deliberately — a new ImageView means
+        // editing the row layout, and none of this fork's Kotlin can be compiled before it
+        // reaches Doug's PC, so the smallest surface that conveys the fact wins.
+        // isAnalyzed() is a local set lookup; see SamPodAnalyzed for why there is no
+        // per-row network call.
+        binding.date.text = if (SamPodAnalyzed.isAnalyzed(episode.downloadUrl)) {
+            TextUtils.concat(summary, " · ✓ ad-skip")
+        } else {
+            summary
+        }
     }
 
     private fun bindStatus(downloadProgress: Int) {
