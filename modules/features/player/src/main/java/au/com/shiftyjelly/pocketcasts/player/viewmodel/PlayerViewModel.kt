@@ -540,14 +540,17 @@ class PlayerViewModel @Inject constructor(
     private var lastMarkAtMs = 0L
 
     /**
-     * Bracket state (2026-07-31). The button is now a TOGGLE, not two buttons: first tap says
-     * "an ad starts around here", second says "…and ends around here". One target to hit while
-     * driving instead of two, and a single tap still behaves exactly as it did before.
+     * Bracket state for the two mark buttons (2026-07-31).
+     *
+     * This was briefly a single toggle button. That was the wrong call and Doug caught it the
+     * same day: he tapped three times meaning "three ads" and got ONE bracketed ad plus an
+     * orphan, because a tap's meaning depended on hidden state. Two buttons, each with one
+     * fixed meaning, is predictable — which matters far more than saving a button.
      *
      * Both taps are HINTS, never boundaries. A tap is a reaction and lands seconds after the
      * thing it marks; the server treats the pair as a search region and snaps the real edges to
-     * word-level ASR. Doug's 07-30 ratification was largely undoing boundaries that had human
-     * lag baked into them — don't re-introduce it from this end.
+     * word-level ASR. The 07-30 ratification was largely undoing boundaries that had human lag
+     * baked into them — don't re-introduce it from this end.
      */
     private var pendingMarkStartS: Double? = null
     private var pendingMarkId: String? = null
@@ -562,75 +565,78 @@ class PlayerViewModel @Inject constructor(
 
     private var pendingMarkJob: kotlinx.coroutines.Job? = null
 
-    fun onMarkAdClick() {
-        // overrideStreamUrl is @Ignore (in-memory only) so the button can't rely on it; instead
-        // compute the SamPod id from the persisted downloadUrl (== how the server keys episodes)
-        // and read server/token from BuildConfig. Independent of the override entirely.
-        val url = (playbackManager.getCurrentEpisode() as? PodcastEpisode)?.downloadUrl ?: run {
-            Toast.makeText(context, "Nothing playing", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val server = BuildConfig.SAMPOD_SERVER.trimEnd('/')
-        val token = BuildConfig.SAMPOD_TOKEN
-        if (server.isBlank() || token.isBlank()) {
-            Toast.makeText(context, "SamPod not configured", Toast.LENGTH_SHORT).show()
-            return
-        }
-        // Debounce: each tap fires a server-side re-analysis (slow); rapid taps flooded it → timeouts.
-        val now = System.currentTimeMillis()
-        if (now - lastMarkAtMs < 4000) return
-        lastMarkAtMs = now
-        val posMs = playbackManager.playbackStateRelay.blockingFirst().positionMs // BehaviorRelay → instant
-        val id = sampodId(url)
-        val posS = posMs / 1000.0
-
-        // ── toggle ──────────────────────────────────────────────────────────────────
-        val open = pendingMarkStartS
-        val stale = now - pendingMarkAtMs > bracketWindowMs
-        val sameEpisode = pendingMarkId == id
-        if (open == null || stale || !sameEpisode) {
-            // FIRST tap — remember it and send nothing yet. Sending on the first tap would
-            // race the second: the server would re-analyze, rewrite the sidecar, and then be
-            // asked to do it again with a bracket it could have had the first time.
-            pendingMarkStartS = posS
-            pendingMarkId = id
-            pendingMarkAtMs = now
-            Toast.makeText(context, "Ad start marked — tap again when it ends",
-                Toast.LENGTH_SHORT).show()
-            android.util.Log.i("SamPod", "mark: bracket opened at ${posS}s id=$id")
-            // A lone tap must still DO something. Without this the old one-tap behavior would
-            // silently become "nothing happens", which is worse than either design. After the
-            // grace period the bracket resolves itself as a plain single mark.
-            pendingMarkJob?.cancel()
-            pendingMarkJob = viewModelScope.launch {
-                delay(singleMarkGraceMs)
-                val stillOpen = pendingMarkStartS
-                if (stillOpen != null && pendingMarkId == id) {
-                    pendingMarkStartS = null
-                    pendingMarkId = null
-                    android.util.Log.i("SamPod", "mark: no second tap — sending single mark")
-                    sendMark(server, token, id, stillOpen, null)
-                }
+    /** "Ad starts here" — records the start locally. No POST: the end tap supplies the
+     *  other half, and sending now would make the server analyze twice. */
+    fun onMarkAdStartClick() {
+        val ctx = markContext() ?: return
+        pendingMarkStartS = ctx.posS
+        pendingMarkId = ctx.id
+        pendingMarkAtMs = System.currentTimeMillis()
+        Toast.makeText(context, "Ad start marked at ${ctx.posS.toInt()}s", Toast.LENGTH_SHORT).show()
+        android.util.Log.i("SamPod", "mark START ${ctx.posS}s id=${ctx.id}")
+        // A start with no end must still land. Without this, forgetting the second button
+        // would silently discard the mark — worse than the old single-button behavior.
+        pendingMarkJob?.cancel()
+        pendingMarkJob = viewModelScope.launch {
+            delay(singleMarkGraceMs)
+            val open = pendingMarkStartS
+            if (open != null && pendingMarkId == ctx.id) {
+                pendingMarkStartS = null
+                pendingMarkId = null
+                android.util.Log.i("SamPod", "mark: no end tap — sending as a single mark")
+                sendMark(ctx.server, ctx.token, ctx.id, open, null)
             }
-            return
         }
-        // SECOND tap — close the bracket. A tap BEFORE the opening one is a mis-tap, not an
-        // ad running backwards; drop the stale start and treat this as a fresh opening.
-        if (posS <= open) {
-            pendingMarkStartS = posS
-            pendingMarkAtMs = now
-            Toast.makeText(context, "Restarted — tap again when the ad ends",
-                Toast.LENGTH_SHORT).show()
-            return
+    }
+
+    /** "Ad ends here" — sends the bracket. With no start pending this is a plain single
+     *  mark at the playhead, i.e. exactly the pre-toggle behavior. */
+    fun onMarkAdEndClick() {
+        val ctx = markContext() ?: return
+        val open = pendingMarkStartS.takeIf {
+            pendingMarkId == ctx.id &&
+                System.currentTimeMillis() - pendingMarkAtMs <= bracketWindowMs
         }
         pendingMarkStartS = null
         pendingMarkId = null
         pendingMarkJob?.cancel()
         pendingMarkJob = null
 
-        Toast.makeText(context, "Ad marked ${open.toInt()}s–${posS.toInt()}s — re-analyzing…",
+        if (open == null || open >= ctx.posS) {
+            // No usable start (never tapped, stale, different episode, or an end BEFORE the
+            // start). Fall back to a single mark rather than dropping the tap or inventing
+            // a backwards window.
+            Toast.makeText(context, "Ad marked at ${ctx.posS.toInt()}s — re-analyzing…",
+                Toast.LENGTH_SHORT).show()
+            sendMark(ctx.server, ctx.token, ctx.id, ctx.posS, null)
+            return
+        }
+        Toast.makeText(context, "Ad marked ${open.toInt()}s–${ctx.posS.toInt()}s — re-analyzing…",
             Toast.LENGTH_SHORT).show()
-        sendMark(server, token, id, open, posS)
+        sendMark(ctx.server, ctx.token, ctx.id, open, ctx.posS)
+    }
+
+    private data class MarkContext(val server: String, val token: String,
+                                   val id: String, val posS: Double)
+
+    /** Shared preamble for both mark buttons: what is playing, where, and is SamPod on. */
+    private fun markContext(): MarkContext? {
+        val url = (playbackManager.getCurrentEpisode() as? PodcastEpisode)?.downloadUrl ?: run {
+            Toast.makeText(context, "Nothing playing", Toast.LENGTH_SHORT).show()
+            return null
+        }
+        val server = BuildConfig.SAMPOD_SERVER.trimEnd('/')
+        val token = BuildConfig.SAMPOD_TOKEN
+        if (server.isBlank() || token.isBlank()) {
+            Toast.makeText(context, "SamPod not configured", Toast.LENGTH_SHORT).show()
+            return null
+        }
+        // Debounce: each SEND fires a server-side re-analysis; rapid taps flooded it → timeouts.
+        val now = System.currentTimeMillis()
+        if (now - lastMarkAtMs < 1500) return null
+        lastMarkAtMs = now
+        val posMs = playbackManager.playbackStateRelay.blockingFirst().positionMs
+        return MarkContext(server, token, sampodId(url), posMs / 1000.0)
     }
 
     /**

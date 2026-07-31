@@ -13,6 +13,7 @@ import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
 import androidx.compose.material.LocalRippleConfiguration
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.RippleConfiguration
@@ -84,7 +85,8 @@ fun PlayerControls(
         onSkipForwardClick = { playerViewModel.onSkipForwardClick() },
         onSkipBackClick = { playerViewModel.onSkipBackwardClick() },
         onSkipForwardLongPress = { playerViewModel.onSkipForwardLongClick() },
-        onMarkAdClick = { playerViewModel.onMarkAdClick() },
+        onMarkAdStartClick = { playerViewModel.onMarkAdStartClick() },
+        onMarkAdEndClick = { playerViewModel.onMarkAdEndClick() },
         modifier = modifier,
     )
 }
@@ -97,7 +99,8 @@ private fun Content(
     onSkipForwardClick: () -> Unit,
     onSkipBackClick: () -> Unit,
     onSkipForwardLongPress: () -> Unit,
-    onMarkAdClick: () -> Unit,
+    onMarkAdStartClick: () -> Unit,
+    onMarkAdEndClick: () -> Unit,
     modifier: Modifier = Modifier,
     playerColors: PlayerColors = MaterialTheme.theme.rememberPlayerColorsOrDefault(),
 ) {
@@ -106,11 +109,21 @@ private fun Content(
         horizontalArrangement = Arrangement.SpaceAround,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // SamPod: mark a missed ad at the current playhead (learning loop).
-        IconButton(onClick = onMarkAdClick) {
+        // SamPod: bracket a missed ad (learning loop). Two buttons, each with ONE fixed
+        // meaning — a single toggle made a tap's effect depend on hidden state, and three
+        // taps meaning "three ads" produced one bracketed ad plus an orphan.
+        IconButton(onClick = onMarkAdStartClick) {
             Icon(
                 imageVector = Icons.Default.Warning,
-                contentDescription = "Mark ad",
+                contentDescription = "Mark ad start",
+                tint = playerColors.contrast01,
+            )
+        }
+
+        IconButton(onClick = onMarkAdEndClick) {
+            Icon(
+                imageVector = Icons.Default.Done,
+                contentDescription = "Mark ad end",
                 tint = playerColors.contrast01,
             )
         }
@@ -233,7 +246,8 @@ private fun PlayerControlsPreview(
             onSkipForwardClick = {},
             onSkipBackClick = {},
             onSkipForwardLongPress = {},
-            onMarkAdClick = {},
+            onMarkAdStartClick = {},
+            onMarkAdEndClick = {},
         )
     }
 }
