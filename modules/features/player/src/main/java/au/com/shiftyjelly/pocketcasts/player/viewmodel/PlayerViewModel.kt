@@ -597,15 +597,29 @@ class PlayerViewModel @Inject constructor(
             pendingMarkId == ctx.id &&
                 System.currentTimeMillis() - pendingMarkAtMs <= bracketWindowMs
         }
-        pendingMarkStartS = null
-        pendingMarkId = null
-        pendingMarkJob?.cancel()
-        pendingMarkJob = null
+
+        // The episode ADVANCED between the two taps. This is the normal case for an ad that
+        // runs to the end of a show: it finishes, Up Next starts the next podcast, and the
+        // ✓ arrives while something else is playing. Sending it against the CURRENT episode
+        // would write a bogus ad into an unrelated show's sidecar — corrupting data Doug
+        // never marked. Attribute it to the episode the ⚠ was pressed on, and leave the
+        // now-playing episode untouched.
+        val staleStart = pendingMarkStartS.takeIf { pendingMarkId != null && pendingMarkId != ctx.id }
+        if (staleStart != null) {
+            val ownerId = pendingMarkId!!
+            Toast.makeText(context, "Ad marked at ${staleStart.toInt()}s on the previous episode",
+                Toast.LENGTH_SHORT).show()
+            android.util.Log.i("SamPod",
+                "mark END after episode change → attributing to $ownerId, not ${ctx.id}")
+            clearPendingMark()
+            sendMark(ctx.server, ctx.token, ownerId, staleStart, null)
+            return
+        }
+        clearPendingMark()
 
         if (open == null || open >= ctx.posS) {
-            // No usable start (never tapped, stale, different episode, or an end BEFORE the
-            // start). Fall back to a single mark rather than dropping the tap or inventing
-            // a backwards window.
+            // No usable start (never tapped, stale, or an end BEFORE the start). Fall back to
+            // a single mark rather than dropping the tap or inventing a backwards window.
             Toast.makeText(context, "Ad marked at ${ctx.posS.toInt()}s — re-analyzing…",
                 Toast.LENGTH_SHORT).show()
             sendMark(ctx.server, ctx.token, ctx.id, ctx.posS, null)
@@ -614,6 +628,13 @@ class PlayerViewModel @Inject constructor(
         Toast.makeText(context, "Ad marked ${open.toInt()}s–${ctx.posS.toInt()}s — re-analyzing…",
             Toast.LENGTH_SHORT).show()
         sendMark(ctx.server, ctx.token, ctx.id, open, ctx.posS)
+    }
+
+    private fun clearPendingMark() {
+        pendingMarkStartS = null
+        pendingMarkId = null
+        pendingMarkJob?.cancel()
+        pendingMarkJob = null
     }
 
     private data class MarkContext(val server: String, val token: String,
