@@ -76,6 +76,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -538,6 +539,29 @@ class PlayerViewModel @Inject constructor(
      */
     private var lastMarkAtMs = 0L
 
+    /**
+     * Bracket state (2026-07-31). The button is now a TOGGLE, not two buttons: first tap says
+     * "an ad starts around here", second says "…and ends around here". One target to hit while
+     * driving instead of two, and a single tap still behaves exactly as it did before.
+     *
+     * Both taps are HINTS, never boundaries. A tap is a reaction and lands seconds after the
+     * thing it marks; the server treats the pair as a search region and snaps the real edges to
+     * word-level ASR. Doug's 07-30 ratification was largely undoing boundaries that had human
+     * lag baked into them — don't re-introduce it from this end.
+     */
+    private var pendingMarkStartS: Double? = null
+    private var pendingMarkId: String? = null
+    private var pendingMarkAtMs = 0L
+
+    /** After this long, a stale open bracket is abandoned rather than joined to a new tap. */
+    private val bracketWindowMs = 5 * 60 * 1000L
+
+    /** How long to wait for a second tap before resolving a lone tap as a single mark.
+     *  Longer than a typical 30-90s ad read, so a real bracket is never cut short. */
+    private val singleMarkGraceMs = 120_000L
+
+    private var pendingMarkJob: kotlinx.coroutines.Job? = null
+
     fun onMarkAdClick() {
         // overrideStreamUrl is @Ignore (in-memory only) so the button can't rely on it; instead
         // compute the SamPod id from the persisted downloadUrl (== how the server keys episodes)
@@ -558,18 +582,78 @@ class PlayerViewModel @Inject constructor(
         lastMarkAtMs = now
         val posMs = playbackManager.playbackStateRelay.blockingFirst().positionMs // BehaviorRelay → instant
         val id = sampodId(url)
+        val posS = posMs / 1000.0
 
-        Toast.makeText(context, "Ad marked at ${posMs / 1000}s — re-analyzing…", Toast.LENGTH_SHORT).show()
+        // ── toggle ──────────────────────────────────────────────────────────────────
+        val open = pendingMarkStartS
+        val stale = now - pendingMarkAtMs > bracketWindowMs
+        val sameEpisode = pendingMarkId == id
+        if (open == null || stale || !sameEpisode) {
+            // FIRST tap — remember it and send nothing yet. Sending on the first tap would
+            // race the second: the server would re-analyze, rewrite the sidecar, and then be
+            // asked to do it again with a bracket it could have had the first time.
+            pendingMarkStartS = posS
+            pendingMarkId = id
+            pendingMarkAtMs = now
+            Toast.makeText(context, "Ad start marked — tap again when it ends",
+                Toast.LENGTH_SHORT).show()
+            android.util.Log.i("SamPod", "mark: bracket opened at ${posS}s id=$id")
+            // A lone tap must still DO something. Without this the old one-tap behavior would
+            // silently become "nothing happens", which is worse than either design. After the
+            // grace period the bracket resolves itself as a plain single mark.
+            pendingMarkJob?.cancel()
+            pendingMarkJob = viewModelScope.launch {
+                delay(singleMarkGraceMs)
+                val stillOpen = pendingMarkStartS
+                if (stillOpen != null && pendingMarkId == id) {
+                    pendingMarkStartS = null
+                    pendingMarkId = null
+                    android.util.Log.i("SamPod", "mark: no second tap — sending single mark")
+                    sendMark(server, token, id, stillOpen, null)
+                }
+            }
+            return
+        }
+        // SECOND tap — close the bracket. A tap BEFORE the opening one is a mis-tap, not an
+        // ad running backwards; drop the stale start and treat this as a fresh opening.
+        if (posS <= open) {
+            pendingMarkStartS = posS
+            pendingMarkAtMs = now
+            Toast.makeText(context, "Restarted — tap again when the ad ends",
+                Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingMarkStartS = null
+        pendingMarkId = null
+        pendingMarkJob?.cancel()
+        pendingMarkJob = null
+
+        Toast.makeText(context, "Ad marked ${open.toInt()}s–${posS.toInt()}s — re-analyzing…",
+            Toast.LENGTH_SHORT).show()
+        sendMark(server, token, id, open, posS)
+    }
+
+    /**
+     * POST the mark. `endS == null` is the pre-2026-07-31 single-mark payload, which the
+     * server still accepts unchanged — so an older app build and this one both work.
+     */
+    private fun sendMark(server: String, token: String, id: String,
+                         startS: Double, endS: Double?) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val payload = "{\"id\":\"$id\",\"timestamp\":${posMs / 1000.0}}"
+                val payload = if (endS == null) {
+                    "{\"id\":\"$id\",\"timestamp\":$startS}"
+                } else {
+                    "{\"id\":\"$id\",\"timestamp\":$startS,\"end_timestamp\":$endS}"
+                }
                 val req = Request.Builder()
                     .url("$server/sampod/relearn?k=$token")
                     .post(payload.toRequestBody("application/json".toMediaTypeOrNull()))
                     .build()
                 val client = OkHttpClient.Builder().callTimeout(35, TimeUnit.SECONDS).build()
                 client.newCall(req).execute().use { resp ->
-                    android.util.Log.i("SamPod", "mark-ad POST ${resp.code} at ${posMs}ms id=$id")
+                    android.util.Log.i("SamPod",
+                        "mark-ad POST ${resp.code} ${startS}s..${endS ?: "-"} id=$id")
                 }
             } catch (e: Exception) {
                 android.util.Log.w("SamPod", "mark-ad failed: ${e.message}")
