@@ -5,6 +5,7 @@ import android.animation.ArgbEvaluator
 import android.animation.ObjectAnimator
 import android.animation.PropertyValuesHolder
 import android.annotation.SuppressLint
+import android.text.TextUtils
 import android.transition.AutoTransition
 import android.transition.TransitionManager
 import android.view.MotionEvent
@@ -18,6 +19,7 @@ import au.com.shiftyjelly.pocketcasts.models.entity.BaseEpisode
 import au.com.shiftyjelly.pocketcasts.player.R
 import au.com.shiftyjelly.pocketcasts.player.databinding.AdapterUpNextBinding
 import au.com.shiftyjelly.pocketcasts.repositories.extensions.getSummaryText
+import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodAnalyzed
 import au.com.shiftyjelly.pocketcasts.repositories.images.PocketCastsImageRequestFactory
 import au.com.shiftyjelly.pocketcasts.repositories.images.loadInto
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
@@ -166,7 +168,16 @@ class UpNextEpisodeViewHolder(
     }
 
     private fun bindDate() {
-        binding.date.text = episode.getSummaryText(dateFormatter = dateFormatter, tintColor = tint, showDuration = false, context = context)
+        val summary = episode.getSummaryText(dateFormatter = dateFormatter, tintColor = tint, showDuration = false, context = context)
+        // SamPod: same "✓ ad-skip" marker as the podcast episode list. Up Next is a SEPARATE
+        // ViewHolder in a different feature module, so badging only the podcasts one meant
+        // the marker showed in a show's episode list and vanished in Up Next — the same
+        // episode, the same sidecar, different row code (Doug, 2026-08-01).
+        binding.date.text = if (SamPodAnalyzed.isAnalyzed(episode.downloadUrl)) {
+            TextUtils.concat(summary, " · ✓ ad-skip")
+        } else {
+            summary
+        }
     }
 
     private fun bindSwipeActions() {

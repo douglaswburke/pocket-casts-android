@@ -1,6 +1,6 @@
-package au.com.shiftyjelly.pocketcasts.podcasts.view.podcast
+package au.com.shiftyjelly.pocketcasts.repositories.sampod
 
-import au.com.shiftyjelly.pocketcasts.podcasts.BuildConfig
+import au.com.shiftyjelly.pocketcasts.repositories.BuildConfig
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -24,9 +24,13 @@ import org.json.JSONObject
  * server exposes one lean id set (/sampod/analyzed, ~500 bytes for 23 episodes); this object
  * caches it and the badge becomes a local set lookup.
  *
- * Deliberately dependency-free — no Hilt, no injection, no Application wiring. The podcasts
- * module cannot see the app module's SamPodApi, and every extra touch point is another thing
- * that can fail to compile on a machine that has no JVM to check it.
+ * Lives in `repositories` because BOTH row renderers need it: the podcast episode list
+ * (podcasts module) and Up Next (player module) are separate ViewHolders in separate feature
+ * modules, and feature modules cannot see each other. Putting it in podcasts first meant the
+ * badge appeared in one list and not the other — which is exactly what Doug hit (2026-08-01).
+ *
+ * Deliberately dependency-free — no Hilt, no injection, no Application wiring. Every extra
+ * touch point is another thing that can fail to compile on a machine with no JVM to check it.
  *
  * Fails silent and open: unreachable server, blank config, or a not-yet-loaded cache all mean
  * "no badge", never a crash and never a wrong badge.
