@@ -172,6 +172,10 @@ class PocketCastsApplication :
         // SamPod ad-skip: observe playback + skip server-detected ad windows. No-op if
         // unconfigured. Guarded so a SamPod failure can NEVER crash the host app.
         try {
+            // Prime the analyzed-episode set before any list can bind. Without it the first
+            // list opened after launch shows no badges at all — the lazy refresh returns
+            // false on its own first call and nothing re-binds the rows when the set lands.
+            au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodAnalyzed.warm()
             au.com.shiftyjelly.pocketcasts.sampod.SamPodSkipCoordinator(
                 playbackManager = playbackManager,
                 scope = applicationScope,

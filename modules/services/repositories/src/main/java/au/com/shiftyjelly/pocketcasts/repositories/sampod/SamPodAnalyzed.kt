@@ -1,5 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.repositories.sampod
 
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import au.com.shiftyjelly.pocketcasts.repositories.BuildConfig
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -53,6 +56,39 @@ object SamPodAnalyzed {
 
     private val configured: Boolean
         get() = BuildConfig.SAMPOD_SERVER.isNotBlank() && BuildConfig.SAMPOD_TOKEN.isNotBlank()
+
+    /**
+     * Prime the cache at app start.
+     *
+     * Without this the first list you open shows NO badges: isAnalyzed() kicks the refresh but
+     * returns false immediately, rows bind once, and nothing re-binds them when the set lands.
+     * Doug hit exactly that — Up Next was bare until he visited Podcasts and came back, which
+     * warmed the cache and forced a rebind (2026-08-01). Warming at startup means the set is
+     * there before any list exists.
+     */
+    fun warm() {
+        if (configured) maybeRefresh()
+    }
+
+    /** Green, so the marker reads at a glance instead of blending into the date line. */
+    private val BADGE_COLOR = 0xFF4CAF50.toInt()   // Material Green 500 — not `const`: .toInt() is a call
+
+    /**
+     * The episode-row summary with " · ✓ ad-skip" appended in green when analyzed.
+     *
+     * Lives here rather than in each ViewHolder so the two renderers (podcast list, Up Next)
+     * cannot drift in wording or colour — they already drifted once by having the badge in
+     * only one of them.
+     */
+    fun badge(summary: CharSequence, downloadUrl: String?): CharSequence {
+        if (!isAnalyzed(downloadUrl)) return summary
+        val out = SpannableStringBuilder(summary)
+        val from = out.length
+        out.append(" · ✓ ad-skip")
+        out.setSpan(ForegroundColorSpan(BADGE_COLOR), from, out.length,
+            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        return out
+    }
 
     /**
      * True when this episode has a SamPod sidecar. Cheap and non-blocking — a set lookup,

@@ -5,7 +5,6 @@ import android.animation.ArgbEvaluator
 import android.animation.ObjectAnimator
 import android.animation.PropertyValuesHolder
 import android.annotation.SuppressLint
-import android.text.TextUtils
 import android.transition.AutoTransition
 import android.transition.TransitionManager
 import android.view.MotionEvent
@@ -173,11 +172,7 @@ class UpNextEpisodeViewHolder(
         // ViewHolder in a different feature module, so badging only the podcasts one meant
         // the marker showed in a show's episode list and vanished in Up Next — the same
         // episode, the same sidecar, different row code (Doug, 2026-08-01).
-        binding.date.text = if (SamPodAnalyzed.isAnalyzed(episode.downloadUrl)) {
-            TextUtils.concat(summary, " · ✓ ad-skip")
-        } else {
-            summary
-        }
+        binding.date.text = SamPodAnalyzed.badge(summary, episode.downloadUrl)
     }
 
     private fun bindSwipeActions() {

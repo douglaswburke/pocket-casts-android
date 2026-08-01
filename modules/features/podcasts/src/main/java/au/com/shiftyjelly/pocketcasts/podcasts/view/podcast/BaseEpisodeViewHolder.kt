@@ -1,7 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.podcasts.view.podcast
 
 import android.content.res.ColorStateList
-import android.text.TextUtils
 import android.transition.AutoTransition
 import android.transition.TransitionManager
 import android.view.View
@@ -210,11 +209,7 @@ abstract class BaseEpisodeViewHolder<T : Any>(
         // reaches Doug's PC, so the smallest surface that conveys the fact wins.
         // isAnalyzed() is a local set lookup; see SamPodAnalyzed for why there is no
         // per-row network call.
-        binding.date.text = if (SamPodAnalyzed.isAnalyzed(episode.downloadUrl)) {
-            TextUtils.concat(summary, " · ✓ ad-skip")
-        } else {
-            summary
-        }
+        binding.date.text = SamPodAnalyzed.badge(summary, episode.downloadUrl)
     }
 
     private fun bindStatus(downloadProgress: Int) {
