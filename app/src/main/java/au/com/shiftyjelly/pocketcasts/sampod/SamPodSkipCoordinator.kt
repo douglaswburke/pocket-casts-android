@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
+import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodRelearnBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -47,6 +48,9 @@ class SamPodSkipCoordinator(
     // @Volatile: an analysis poller on one IO thread may adopt a just-ready sidecar while
     // the playback collector reads these on another.
     @Volatile private var currentEpisodeUuid: String? = null
+    // The sampod id (sha1(downloadUrl)[:16]) of the current episode — matched against relearn
+    // events so a mark on episode A never swaps the sidecar while episode B is playing.
+    @Volatile private var currentSampodId: String? = null
 
     @Volatile private var sidecar: Sidecar? = null
     // Concurrent sets, not plain ones: prepareQueue() runs on the IO dispatcher and each
@@ -73,6 +77,12 @@ class SamPodSkipCoordinator(
             playbackManager.upNextQueue.changesObservable.asFlow().collect {
                 prepareQueue()
             }
+        }
+        // Increment 6b (2026-08-06): a mark-a-miss relearn returns the fresh sidecar; adopt it
+        // live if it's for the episode playing now, so the correction takes effect immediately
+        // instead of waiting for the next episode-open re-fetch (the read-once bug).
+        scope.launch {
+            SamPodRelearnBus.events.collect { onRelearned(it) }
         }
     }
 
@@ -186,6 +196,23 @@ class SamPodSkipCoordinator(
         playbackManager.seekToTimeMs(decision.seekToMs)
     }
 
+    /**
+     * A mark-a-miss relearn produced a fresh sidecar (carried over [SamPodRelearnBus] from the
+     * player module). If it is for the episode playing now, adopt it live — same live-swap the
+     * auto-queue poller does — so the corrected skips take effect without re-opening the
+     * episode. Ignored if it is for a different episode than the one currently playing.
+     */
+    private fun onRelearned(event: SamPodRelearnBus.Relearn) {
+        if (event.sampodId != currentSampodId) return
+        val sc = api.parseSidecar(event.sidecarJson, event.sampodId) ?: run {
+            Log.w(TAG, "relearn: could not parse fresh sidecar for ${event.sampodId}")
+            return
+        }
+        sidecar = sc
+        controller.reset()
+        Log.i(TAG, "relearn adopted live: ${sc.skips.size} ad(s) for $currentEpisodeUuid")
+    }
+
     private suspend fun loadSidecar(): Sidecar? = withContext(Dispatchers.IO) {
         val episode = playbackManager.getCurrentEpisode() ?: run {
             Log.w(TAG, "no current episode")
@@ -196,6 +223,7 @@ class SamPodSkipCoordinator(
             return@withContext null
         }
         val id = sha1Id(url)
+        currentSampodId = id
         Log.i(TAG, "loadSidecar id=$id url=${url.take(90)}")
         val sc = api.fetchSidecar(id) ?: return@withContext null
 

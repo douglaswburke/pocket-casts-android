@@ -41,6 +41,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.playback.UpNextQueue
 import au.com.shiftyjelly.pocketcasts.repositories.playback.UpNextSource
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
+import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodRelearnBus
 import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.Util
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
@@ -679,8 +680,23 @@ class PlayerViewModel @Inject constructor(
                     .build()
                 val client = OkHttpClient.Builder().callTimeout(35, TimeUnit.SECONDS).build()
                 client.newCall(req).execute().use { resp ->
+                    val body = resp.body?.string()
                     android.util.Log.i("SamPod",
                         "mark-ad POST ${resp.code} ${startS}s..${endS ?: "-"} id=$id")
+                    // SamPod increment 6b: the relearn response carries the UPDATED sidecar.
+                    // Hand it to the skip engine (via the cross-module bus) so the correction
+                    // applies to the currently-playing episode NOW, not on the next re-fetch.
+                    if (resp.isSuccessful && body != null) {
+                        val sidecar = try {
+                            org.json.JSONObject(body).optJSONObject("sidecar")
+                        } catch (e: Exception) {
+                            android.util.Log.w("SamPod", "mark-ad: relearn body parse failed: ${e.message}")
+                            null
+                        }
+                        if (sidecar != null) {
+                            SamPodRelearnBus.publish(id, sidecar.toString())
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 android.util.Log.w("SamPod", "mark-ad failed: ${e.message}")
