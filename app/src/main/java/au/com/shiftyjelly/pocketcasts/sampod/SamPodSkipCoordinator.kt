@@ -197,21 +197,45 @@ class SamPodSkipCoordinator(
     }
 
     /**
-     * A mark-a-miss relearn produced a fresh sidecar (carried over [SamPodRelearnBus] from the
-     * player module). If it is for the episode playing now, adopt it live — same live-swap the
-     * auto-queue poller does — so the corrected skips take effect without re-opening the
-     * episode. Ignored if it is for a different episode than the one currently playing.
+     * A mark-a-miss was SUBMITTED for an episode (signalled over [SamPodRelearnBus] from the
+     * player module). If it is for the episode playing now, poll the sidecar and adopt the
+     * result live. Ignored if it is for a different episode than the one currently playing.
      */
     private fun onRelearned(event: SamPodRelearnBus.Relearn) {
-        if (event.sampodId != currentSampodId) return
-        val sc = api.parseSidecar(event.sidecarJson, event.sampodId) ?: run {
-            Log.w(TAG, "relearn: could not parse fresh sidecar for ${event.sampodId}")
+        val id = event.sampodId
+        if (id != currentSampodId) {
+            Log.i(TAG, "relearn signal for $id ignored (current=$currentSampodId)")
             return
         }
-        sidecar = sc
-        controller.reset()
-        Log.i(TAG, "relearn adopted live: ${sc.skips.size} ad(s) for $currentEpisodeUuid")
+        scope.launch { pollAndAdopt(id) }
     }
+
+    /**
+     * The server's mark-a-miss relearn runs an LLM (~35-75s) but writes a provisional skip
+     * almost immediately. Poll the sidecar and adopt each time the skip-set changes — catching
+     * first the provisional window (seconds) then the LLM-refined one (~a minute) — so the
+     * correction takes effect on the playing episode with no re-open. Bounded (~90s); stops
+     * early if the episode changes under us.
+     */
+    private suspend fun pollAndAdopt(id: String) {
+        var lastSig = sidecar.skipSignature()
+        repeat(12) {   // 12 * 8s ≈ 96s — covers the slowest observed relearn
+            delay(8_000)
+            if (id != currentSampodId) return   // episode changed — abandon this poll
+            val fresh = withContext(Dispatchers.IO) { api.fetchSidecar(id) } ?: return@repeat
+            val sig = fresh.skipSignature()
+            if (sig != lastSig) {
+                sidecar = fresh
+                controller.reset()
+                lastSig = sig
+                Log.i(TAG, "relearn adopted live (poll): ${fresh.skips.size} ad(s) for $currentEpisodeUuid")
+            }
+        }
+    }
+
+    /** A change-detection fingerprint of a sidecar's ad windows (order-independent). */
+    private fun Sidecar?.skipSignature(): String =
+        this?.skips?.sortedBy { it.startMs }?.joinToString(",") { "${it.startMs}-${it.endMs}" } ?: ""
 
     private suspend fun loadSidecar(): Sidecar? = withContext(Dispatchers.IO) {
         val episode = playbackManager.getCurrentEpisode() ?: run {

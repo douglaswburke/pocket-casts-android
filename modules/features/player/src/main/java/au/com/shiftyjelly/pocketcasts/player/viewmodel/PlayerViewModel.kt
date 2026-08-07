@@ -667,6 +667,12 @@ class PlayerViewModel @Inject constructor(
      */
     private fun sendMark(server: String, token: String, id: String,
                          startS: Double, endS: Double?) {
+        // SamPod #6b (2026-08-07): tell the skip engine a correction is inbound for this
+        // episode BEFORE the POST. The server-side relearn runs an LLM (~35-75s) that can
+        // outlast this request's timeout, but the server still processes the mark — so the
+        // coordinator polls the sidecar and adopts the result live either way. We no longer
+        // depend on the POST response body.
+        SamPodRelearnBus.publish(id)
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val payload = if (endS == null) {
@@ -680,27 +686,13 @@ class PlayerViewModel @Inject constructor(
                     .build()
                 val client = OkHttpClient.Builder().callTimeout(35, TimeUnit.SECONDS).build()
                 client.newCall(req).execute().use { resp ->
-                    // resp.body is non-null in this OkHttp version — no safe call (would trip -Werror).
-                    val body = resp.body.string()
                     android.util.Log.i("SamPod",
                         "mark-ad POST ${resp.code} ${startS}s..${endS ?: "-"} id=$id")
-                    // SamPod increment 6b: the relearn response carries the UPDATED sidecar.
-                    // Hand it to the skip engine (via the cross-module bus) so the correction
-                    // applies to the currently-playing episode NOW, not on the next re-fetch.
-                    if (resp.isSuccessful && body.isNotEmpty()) {
-                        val sidecar = try {
-                            org.json.JSONObject(body).optJSONObject("sidecar")
-                        } catch (e: Exception) {
-                            android.util.Log.w("SamPod", "mark-ad: relearn body parse failed: ${e.message}")
-                            null
-                        }
-                        if (sidecar != null) {
-                            SamPodRelearnBus.publish(id, sidecar.toString())
-                        }
-                    }
                 }
             } catch (e: Exception) {
-                android.util.Log.w("SamPod", "mark-ad failed: ${e.message}")
+                // A timeout here is expected and harmless — the server processes the mark
+                // regardless and the coordinator's poll adopts it. Logged, not fatal.
+                android.util.Log.w("SamPod", "mark-ad POST failed (poll will still adopt): ${e.message}")
             }
         }
     }

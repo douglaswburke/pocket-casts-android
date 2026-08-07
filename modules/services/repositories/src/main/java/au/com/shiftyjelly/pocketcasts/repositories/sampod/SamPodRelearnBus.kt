@@ -5,29 +5,30 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 
 /**
- * Cross-module hand-off for a fresh SamPod sidecar produced by a mark-a-miss relearn.
+ * Cross-module signal that a mark-a-miss correction was SUBMITTED for an episode.
  *
  * The mark button lives in the player FEATURE module (PlayerViewModel); the skip engine lives
  * in the APP module (SamPodSkipCoordinator). Neither can reference the other, but both depend
  * on `repositories` — so this object is the seam between them.
  *
- * When a mark POSTs to `/sampod/relearn`, the server returns the UPDATED sidecar in its
- * response. The mark handler publishes it here (episode sampod-id + the sidecar JSON); the
- * coordinator collects it and, if it is for the CURRENTLY PLAYING episode, adopts it live — so
- * the corrected skips take effect immediately instead of only on the next episode-open
- * re-fetch (the read-once bug, SamPod increment 6b, 2026-08-06).
+ * It carries only the episode's sampod-id, NOT a sidecar. The server-side relearn runs an LLM
+ * (~35-75s, longer than the mark POST's HTTP timeout) but writes a provisional skip almost
+ * immediately, so the coordinator responds to this signal by POLLING the sidecar and adopting
+ * the result live — first the provisional window (seconds), then the LLM-refined one (~a
+ * minute). Decoupling from the POST response is deliberate: the mark POST can even time out and
+ * the correction still lands, because the server processes it regardless (SamPod #6b, 2026-08-07).
  */
 object SamPodRelearnBus {
-    data class Relearn(val sampodId: String, val sidecarJson: String)
+    data class Relearn(val sampodId: String)
 
-    // extraBufferCapacity so tryEmit never drops a relearn under a momentary collector stall;
-    // replay = 0 (default) because a relearn only matters live — a late subscriber must not
-    // re-apply a stale one to a different episode.
+    // extraBufferCapacity so tryEmit never drops a submit under a momentary collector stall;
+    // replay = 0 because a submit only matters live — a late subscriber must not re-poll for
+    // a correction that already settled on a since-changed episode.
     private val mutableEvents = MutableSharedFlow<Relearn>(extraBufferCapacity = 8)
     val events: SharedFlow<Relearn> = mutableEvents.asSharedFlow()
 
-    /** Non-blocking publish from the mark handler's IO coroutine. */
-    fun publish(sampodId: String, sidecarJson: String) {
-        mutableEvents.tryEmit(Relearn(sampodId, sidecarJson))
+    /** Non-blocking publish from the mark handler. Fired when the mark is submitted. */
+    fun publish(sampodId: String) {
+        mutableEvents.tryEmit(Relearn(sampodId))
     }
 }

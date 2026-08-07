@@ -77,10 +77,6 @@ class SamPodApi(
         }
     }
 
-    /** Parse a sidecar JSON body (e.g. the `sidecar` object from a `/sampod/relearn` response)
-     *  into a [Sidecar]. Public so the coordinator can adopt a relearned sidecar live (#6b). */
-    fun parseSidecar(json: String, fallbackId: String): Sidecar? = parse(json, fallbackId)
-
     private fun parse(json: String, fallbackId: String): Sidecar? = try {
         val o = JSONObject(json)
         val arr = o.optJSONArray("skips")
