@@ -680,13 +680,14 @@ class PlayerViewModel @Inject constructor(
                     .build()
                 val client = OkHttpClient.Builder().callTimeout(35, TimeUnit.SECONDS).build()
                 client.newCall(req).execute().use { resp ->
-                    val body = resp.body?.string()
+                    // resp.body is non-null in this OkHttp version — no safe call (would trip -Werror).
+                    val body = resp.body.string()
                     android.util.Log.i("SamPod",
                         "mark-ad POST ${resp.code} ${startS}s..${endS ?: "-"} id=$id")
                     // SamPod increment 6b: the relearn response carries the UPDATED sidecar.
                     // Hand it to the skip engine (via the cross-module bus) so the correction
                     // applies to the currently-playing episode NOW, not on the next re-fetch.
-                    if (resp.isSuccessful && body != null) {
+                    if (resp.isSuccessful && body.isNotEmpty()) {
                         val sidecar = try {
                             org.json.JSONObject(body).optJSONObject("sidecar")
                         } catch (e: Exception) {
