@@ -28,6 +28,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.file.FileStorage
 import au.com.shiftyjelly.pocketcasts.repositories.file.StorageException
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.UserEpisodeManager
+import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodOverrideStore
 import au.com.shiftyjelly.pocketcasts.servers.di.Downloads
 import au.com.shiftyjelly.pocketcasts.utils.Network
 import au.com.shiftyjelly.pocketcasts.utils.extensions.anyMessageContains
@@ -200,15 +201,21 @@ class DownloadEpisodeWorker @AssistedInject constructor(
     }
 
     private fun refreshDownloadUrlOrThrow(episode: BaseEpisode) = runBlocking<BaseEpisode> {
+        // SamPod #6a: if a processed cached-copy URL is registered for this episode, download
+        // THOSE bytes (byte-exact with the ad-skip sidecar) instead of the ad-laden canonical
+        // enclosure — and DON'T refresh/persist download_url, so the DB keeps the real enclosure
+        // (the sidecar id is sha1(downloadUrl) and re-analysis must stay correct). Unregistered
+        // episodes fall through to the normal server refresh untouched.
+        val samPodUrl = SamPodOverrideStore.get(episode.uuid)
         when (episode) {
             is PodcastEpisode -> {
-                val freshDownloadUrl = episodeManager.updateDownloadUrl(episode)
-                episode.copy(downloadUrl = freshDownloadUrl)
+                val downloadUrl = samPodUrl ?: episodeManager.updateDownloadUrl(episode)
+                episode.copy(downloadUrl = downloadUrl)
             }
 
             is UserEpisode -> {
-                val freshDownloadUrl = userEpisodeManager.getPlaybackUrlRxSingle(episode).await()
-                episode.copy(downloadUrl = freshDownloadUrl)
+                val downloadUrl = samPodUrl ?: userEpisodeManager.getPlaybackUrlRxSingle(episode).await()
+                episode.copy(downloadUrl = downloadUrl)
             }
         }
     }

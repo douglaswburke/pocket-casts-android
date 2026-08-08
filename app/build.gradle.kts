@@ -38,6 +38,14 @@ android {
             "SAMPOD_AUTOQUEUE",
             (sampodProp("sampod.autoqueue").lowercase() != "false").toString(),
         )
+        // Offline download (#6a): download each queued+analyzed episode's cached copy through
+        // Pocket Casts' own pipeline so it plays local in the truck. Inherits the user's network
+        // prefs (wifi-only etc.). Off switch, no code change: `sampod.autodownload=false`. On by default.
+        buildConfigField(
+            "boolean",
+            "SAMPOD_AUTODOWNLOAD",
+            (sampodProp("sampod.autodownload").lowercase() != "false").toString(),
+        )
     }
 
     sourceSets {

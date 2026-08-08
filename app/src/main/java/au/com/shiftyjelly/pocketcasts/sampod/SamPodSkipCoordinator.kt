@@ -1,11 +1,15 @@
 package au.com.shiftyjelly.pocketcasts.sampod
 
 import android.util.Log
+import au.com.shiftyjelly.pocketcasts.analytics.SourceView
 import au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode
+import au.com.shiftyjelly.pocketcasts.repositories.download.DownloadQueue
+import au.com.shiftyjelly.pocketcasts.repositories.download.DownloadType
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
+import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodOverrideStore
 import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodRelearnBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +46,11 @@ class SamPodSkipCoordinator(
     private val episodeManager: EpisodeManager,
     private val podcastManager: PodcastManager? = null,
     private val autoQueue: Boolean = true,
+    // #6a offline: when set, a queued+analyzed episode's cached copy is downloaded through
+    // Pocket Casts' own download pipeline so it plays local (truck/offline). Null = no download,
+    // stream-from-tailnet as before (nothing regresses when unwired).
+    private val downloadQueue: DownloadQueue? = null,
+    private val autoDownload: Boolean = true,
 ) {
     private val api = SamPodApi(baseUrl = serverUrl.trimEnd('/'), token = token)
     private val controller = AdSkipController()
@@ -59,6 +68,9 @@ class SamPodSkipCoordinator(
 
     /** Episodes we've asked the server to analyze, so one queue-add starts one poller. */
     private val awaitingAnalysis: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Episodes we've enqueued for offline download, so one attach kicks one download (#6a). */
+    private val downloadRequested: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     fun start() {
         if (serverUrl.isBlank() || token.isBlank()) {
@@ -117,7 +129,35 @@ class SamPodSkipCoordinator(
         val cached = api.cachedAudioUrl(id) ?: return
         episode.overrideStreamUrl = cached
         episodeManager.update(episode)
+        // #6a: register the processed URL so the download worker fetches the cached copy (not the
+        // ad-laden enclosure), then kick that download so the episode plays offline in the truck.
+        SamPodOverrideStore.put(episode.uuid, cached)
+        maybeDownloadOffline(episode)
         Log.i(TAG, "queue-prep: overrideStreamUrl set for ${episode.uuid} (${sc.skips.size} ads)")
+    }
+
+    /**
+     * #6a — download the cached copy through Pocket Casts' own pipeline so the episode plays from
+     * a LOCAL file (works in the truck with the tailnet unreachable). The worker reads
+     * [SamPodOverrideStore] and fetches the cached copy in place of the enclosure
+     * (`DownloadEpisodeWorker.refreshDownloadUrlOrThrow`); once `isDownloaded`, `EpisodeLocation`
+     * plays the local bytes, which are byte-exact with the sidecar so skips still align.
+     *
+     * Bypasses the per-podcast auto-download toggle (SamPod prefetch is independent of it) but
+     * INHERITS the user's network prefs, so it never burns cellular unexpectedly. No-op if
+     * already local / in flight / requested this session, or if offline download is unwired.
+     */
+    private fun maybeDownloadOffline(episode: PodcastEpisode) {
+        if (!autoDownload) return
+        val queue = downloadQueue ?: return
+        if (episode.isDownloaded || episode.isDownloading || episode.isQueuedForDownload) return
+        if (!downloadRequested.add(episode.uuid)) return
+        queue.enqueue(
+            episodeUuid = episode.uuid,
+            downloadType = DownloadType.Automatic(bypassAutoDownloadStatus = true),
+            sourceView = SourceView.UNKNOWN,
+        )
+        Log.i(TAG, "offline: queued download of cached copy for ${episode.uuid}")
     }
 
     /**
@@ -258,6 +298,9 @@ class SamPodSkipCoordinator(
         if (cached != null && episode is PodcastEpisode && episode.overrideStreamUrl != cached) {
             episode.overrideStreamUrl = cached
             episodeManager.update(episode)
+            // Register for #6a so any later download fetches the cached copy — but don't kick a
+            // download here: this path fires while the episode is already playing (online).
+            SamPodOverrideStore.put(episode.uuid, cached)
             Log.i(TAG, "set overrideStreamUrl -> cached copy (play-time fallback; queue-prep normally does this first)")
         }
         sc

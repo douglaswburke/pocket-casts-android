@@ -16,6 +16,7 @@ import au.com.shiftyjelly.pocketcasts.models.type.EpisodeDownloadStatus
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.appreview.AppReviewExceptionHandler
 import au.com.shiftyjelly.pocketcasts.repositories.appreview.AppReviewManager
+import au.com.shiftyjelly.pocketcasts.repositories.download.DownloadManager
 import au.com.shiftyjelly.pocketcasts.repositories.download.DownloadStatusObserver
 import au.com.shiftyjelly.pocketcasts.repositories.endofyear.EndOfYearSync
 import au.com.shiftyjelly.pocketcasts.repositories.file.FileStorage
@@ -93,6 +94,8 @@ class PocketCastsApplication :
     @Inject lateinit var playbackManager: PlaybackManager
 
     @Inject lateinit var downloadStatusObserver: DownloadStatusObserver
+
+    @Inject lateinit var downloadManager: DownloadManager
 
     @Inject lateinit var notificationHelper: NotificationHelper
 
@@ -176,6 +179,9 @@ class PocketCastsApplication :
             // list opened after launch shows no badges at all — the lazy refresh returns
             // false on its own first call and nothing re-binds the rows when the set lands.
             au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodAnalyzed.warm()
+            // #6a: prime the uuid->cached-URL store before any download worker can run, so a
+            // worker fetches the cached copy (byte-exact with the sidecar) not the ad-laden enclosure.
+            au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodOverrideStore.init(this)
             au.com.shiftyjelly.pocketcasts.sampod.SamPodSkipCoordinator(
                 playbackManager = playbackManager,
                 scope = applicationScope,
@@ -184,6 +190,8 @@ class PocketCastsApplication :
                 episodeManager = episodeManager,
                 podcastManager = podcastManager,
                 autoQueue = BuildConfig.SAMPOD_AUTOQUEUE,
+                downloadQueue = downloadManager,
+                autoDownload = BuildConfig.SAMPOD_AUTODOWNLOAD,
             ).start()
         } catch (e: Throwable) {
             android.util.Log.e("SamPod", "ad-skip init failed", e)
