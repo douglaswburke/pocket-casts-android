@@ -18,6 +18,7 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.preferences.model.ArtworkConfiguration.Element
 import au.com.shiftyjelly.pocketcasts.repositories.images.PocketCastsImageRequestFactory
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeRowDataProvider
+import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodAnalyzed
 import au.com.shiftyjelly.pocketcasts.ui.extensions.getThemeColor
 import au.com.shiftyjelly.pocketcasts.views.buttons.PlayButton
 import au.com.shiftyjelly.pocketcasts.views.multiselect.MultiSelectEpisodesHelper
@@ -52,6 +53,21 @@ class EpisodeListAdapter(
     private val multiSelectHelper: MultiSelectEpisodesHelper,
     private val fragmentManager: FragmentManager,
 ) : ListAdapter<BaseEpisode, RecyclerView.ViewHolder>(PLAYBACK_DIFF) {
+
+    // SamPod: re-bind rows when the analyzed-episode set lands or changes, so the "✓ ad-skip"
+    // badge appears without leaving the screen (Doug, 2026-09-14: Up Next was bare at 05:15
+    // because the launch-time fetch failed and nothing re-bound the rows once it succeeded).
+    private val samPodAnalyzedListener = SamPodAnalyzed.Listener { notifyDataSetChanged() }
+
+    override fun onAttachedToRecyclerView(recyclerView: RecyclerView) {
+        super.onAttachedToRecyclerView(recyclerView)
+        SamPodAnalyzed.addListener(samPodAnalyzedListener)
+    }
+
+    override fun onDetachedFromRecyclerView(recyclerView: RecyclerView) {
+        SamPodAnalyzed.removeListener(samPodAnalyzedListener)
+        super.onDetachedFromRecyclerView(recyclerView)
+    }
 
     init {
         setHasStableIds(true)

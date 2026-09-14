@@ -38,6 +38,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.images.loadInto
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.UpNextSource
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
+import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodAnalyzed
 import au.com.shiftyjelly.pocketcasts.settings.onboarding.OnboardingFlow
 import au.com.shiftyjelly.pocketcasts.settings.onboarding.OnboardingLauncher
 import au.com.shiftyjelly.pocketcasts.settings.onboarding.OnboardingUpgradeSource
@@ -85,6 +86,21 @@ class UpNextAdapter(
     private val onSortTooltipTapped: () -> Unit,
     private val onSwipeAction: (BaseEpisode, SwipeAction) -> Unit,
 ) : ListAdapter<Any, RecyclerView.ViewHolder>(UPNEXT_ADAPTER_DIFF) {
+
+    // SamPod: re-bind rows when the analyzed-episode set lands or changes, so the "✓ ad-skip"
+    // badge appears without leaving the screen (Doug, 2026-09-14: Up Next was bare at 05:15
+    // because the launch-time fetch failed and nothing re-bound the rows once it succeeded).
+    private val samPodAnalyzedListener = SamPodAnalyzed.Listener { notifyDataSetChanged() }
+
+    override fun onAttachedToRecyclerView(recyclerView: RecyclerView) {
+        super.onAttachedToRecyclerView(recyclerView)
+        SamPodAnalyzed.addListener(samPodAnalyzedListener)
+    }
+
+    override fun onDetachedFromRecyclerView(recyclerView: RecyclerView) {
+        SamPodAnalyzed.removeListener(samPodAnalyzedListener)
+        super.onDetachedFromRecyclerView(recyclerView)
+    }
     private val dateFormatter = RelativeDateFormatter(context)
 
     private val imageRequestFactory = PocketCastsImageRequestFactory(

@@ -1,15 +1,20 @@
 package au.com.shiftyjelly.pocketcasts.repositories.sampod
 
+import android.os.Handler
+import android.os.Looper
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import au.com.shiftyjelly.pocketcasts.repositories.BuildConfig
+import java.io.IOException
 import java.security.MessageDigest
+import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -37,15 +42,40 @@ import org.json.JSONObject
  *
  * Fails silent and open: unreachable server, blank config, or a not-yet-loaded cache all mean
  * "no badge", never a crash and never a wrong badge.
+ *
+ * 2026-09-14 (Doug's 05:15 flag — Up Next showed no badges, then all of them "now"): the
+ * server log proved the phone fetched four sidecars fine at 05:13:06 but never asked for
+ * /sampod/analyzed at all. Across the prior 10 days, 6 of 19 app launches had the same
+ * signature. The first outbound call at app start was failing (the tailnet route is not
+ * always up in the first moments after launch), and two things then compounded it:
+ *   1. a failure backed off a FULL TTL (5 min) — so the very fetch that was most likely to
+ *      fail was also the one retried the slowest; and
+ *   2. when the set finally arrived nothing re-bound the already-drawn rows, so the badge
+ *      only appeared after Doug left the screen and came back.
+ * Fix: a failed fetch retries at 3s / 10s / 30s and backs off only 20s after that, and any
+ * change to the set notifies registered adapters (Up Next, podcast list) to re-bind.
  */
 object SamPodAnalyzed {
+    /** Adapters register one of these to re-bind rows when the analyzed set changes. */
+    fun interface Listener {
+        fun onAnalyzedSetChanged()
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val refreshing = AtomicBoolean(false)
+    private val listeners = CopyOnWriteArraySet<Listener>()
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     @Volatile private var ids: Set<String> = emptySet()
     @Volatile private var loadedAtMs = 0L
 
     private const val TTL_MS = 5 * 60 * 1000L
+
+    /** After the retry chain is exhausted, how long a bind waits before kicking a new fetch. */
+    private const val FAIL_BACKOFF_MS = 20 * 1000L
+
+    /** Quick retries after a failed fetch — covers a tailnet route that is a few seconds late. */
+    private val RETRY_DELAYS_MS = longArrayOf(3_000L, 10_000L, 30_000L)
 
     private val client by lazy {
         OkHttpClient.Builder()
@@ -68,6 +98,15 @@ object SamPodAnalyzed {
      */
     fun warm() {
         if (configured) maybeRefresh()
+    }
+
+    /** Called on the main thread whenever the analyzed set changes. Safe to call repeatedly. */
+    fun addListener(listener: Listener) {
+        listeners.add(listener)
+    }
+
+    fun removeListener(listener: Listener) {
+        listeners.remove(listener)
     }
 
     /** Green, so the marker reads at a glance instead of blending into the date line. */
@@ -95,9 +134,9 @@ object SamPodAnalyzed {
      * plus a background refresh kick when the cache is cold or stale.
      *
      * Returns false while the first fetch is still in flight, so a freshly-opened list may
-     * badge nothing for a moment and then badge correctly on the next bind. That is the right
-     * trade: a missing badge is a small cosmetic miss, whereas blocking a bind on the network
-     * would jank the scroll.
+     * badge nothing for a moment; the registered adapters re-bind when the set lands. That is
+     * the right trade: a missing badge is a small cosmetic miss, whereas blocking a bind on
+     * the network would jank the scroll.
      */
     fun isAnalyzed(downloadUrl: String?): Boolean {
         if (!configured || downloadUrl.isNullOrBlank()) return false
@@ -108,35 +147,61 @@ object SamPodAnalyzed {
     private fun maybeRefresh() {
         if (System.currentTimeMillis() - loadedAtMs < TTL_MS) return
         if (!refreshing.compareAndSet(false, true)) return // one refresh in flight, not one per row
-        scope.launch {
-            try {
-                val url = "${BuildConfig.SAMPOD_SERVER.trimEnd('/')}/sampod/analyzed"
-                    .toHttpUrlOrNull()
-                    ?.newBuilder()
-                    ?.addQueryParameter("k", BuildConfig.SAMPOD_TOKEN)
-                    ?.build()
-                    ?.toString()
-                if (url == null) {
-                    loadedAtMs = System.currentTimeMillis() // don't hammer a malformed base url
-                    return@launch
-                }
-                client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use
-                    val arr = JSONObject(resp.body.string()).optJSONArray("ids") ?: return@use
-                    val next = HashSet<String>(arr.length())
-                    for (i in 0 until arr.length()) next.add(arr.getString(i))
-                    ids = next
-                    android.util.Log.i("SamPod", "analyzed set refreshed: ${next.size} episode(s)")
-                }
-                loadedAtMs = System.currentTimeMillis()
-            } catch (e: Exception) {
-                // Off the tailnet is the normal case, not an error worth shouting about.
-                // Back off a full TTL so a list scroll doesn't retry on every bind.
-                loadedAtMs = System.currentTimeMillis()
-                android.util.Log.d("SamPod", "analyzed refresh failed: ${e.javaClass.simpleName}")
-            } finally {
-                refreshing.set(false)
+        scope.launch { refresh(attempt = 0) }
+    }
+
+    /**
+     * One fetch of /sampod/analyzed. Runs with `refreshing` held and releases it on exit.
+     * On failure, schedules the next attempt from RETRY_DELAYS_MS (which re-acquires the flag).
+     */
+    private suspend fun refresh(attempt: Int) {
+        try {
+            val url = "${BuildConfig.SAMPOD_SERVER.trimEnd('/')}/sampod/analyzed"
+                .toHttpUrlOrNull()
+                ?.newBuilder()
+                ?.addQueryParameter("k", BuildConfig.SAMPOD_TOKEN)
+                ?.build()
+                ?.toString()
+            if (url == null) {
+                loadedAtMs = System.currentTimeMillis() // don't hammer a malformed base url
+                return
             }
+            client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}")
+                val arr = JSONObject(resp.body.string()).optJSONArray("ids")
+                    ?: throw IOException("no ids in response")
+                val next = HashSet<String>(arr.length())
+                for (i in 0 until arr.length()) next.add(arr.getString(i))
+                val changed = next != ids
+                ids = next
+                android.util.Log.i("SamPod", "analyzed set refreshed: ${next.size} episode(s)" +
+                    if (changed) " (changed — re-binding lists)" else "")
+                if (changed) notifyChanged()
+            }
+            loadedAtMs = System.currentTimeMillis()
+        } catch (e: Exception) {
+            // Off the tailnet is the normal case, not an error worth shouting about — but a
+            // launch-time miss was silently costing the badge for 5 minutes, so retry fast and
+            // back off short. Log at WARN with the message so a logcat read can tell a
+            // "route not up yet" from a "server down".
+            loadedAtMs = System.currentTimeMillis() - TTL_MS + FAIL_BACKOFF_MS
+            android.util.Log.w("SamPod", "analyzed refresh failed (attempt $attempt): " +
+                "${e.javaClass.simpleName}: ${e.message}")
+            if (attempt < RETRY_DELAYS_MS.size) {
+                val delayMs = RETRY_DELAYS_MS[attempt]
+                scope.launch {
+                    delay(delayMs)
+                    if (refreshing.compareAndSet(false, true)) refresh(attempt + 1)
+                }
+            }
+        } finally {
+            refreshing.set(false)
+        }
+    }
+
+    private fun notifyChanged() {
+        mainHandler.post {
+            for (listener in listeners) listener.onAnalyzedSetChanged()
         }
     }
 
