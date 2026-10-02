@@ -10,6 +10,7 @@ import androidx.media.AudioFocusRequestCompat
 import androidx.media.AudioManagerCompat
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.preferences.model.PlayOverNotificationSetting
+import au.com.shiftyjelly.pocketcasts.utils.Util
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineScope
@@ -134,6 +135,42 @@ class FocusManager(
                 LogBuffer.e(LogBuffer.TAG_PLAYBACK, "Giving up audio focus request failed")
             }
         }
+    }
+
+    /**
+     * SamPod car-mode resume: which car audio route is connected, or null if none.
+     * Signals, any one is enough: Android Auto projection (car UI mode), the `remote-submix`
+     * virtual device AA routes phone audio through, or a Bluetooth A2DP sink (the truck's
+     * head unit; also matches BT headphones, which is acceptable — resume is still gated on
+     * nothing else playing).
+     */
+    fun carAudioRouteOrNull(context: Context): String? {
+        if (Util.isCarUiMode(context)) return "car-ui-mode"
+        val manager = audioManager ?: return null
+        val outputs = try {
+            manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        } catch (e: Exception) {
+            return null
+        }
+        return when {
+            outputs.any { it.type == AudioDeviceInfo.TYPE_REMOTE_SUBMIX } -> "remote-submix"
+            outputs.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } -> "bluetooth-a2dp"
+            else -> null
+        }
+    }
+
+    /**
+     * SamPod car-mode resume: true when something else is using the audio output — another
+     * app actually playing, or a phone call / VoIP session. We never re-take focus over these.
+     * Our own player is paused when this is consulted, so `isMusicActive` reflects others only.
+     */
+    fun isOtherAudioActive(): Boolean {
+        val manager = audioManager ?: return false
+        val mode = manager.mode
+        if (mode == AudioManager.MODE_IN_CALL || mode == AudioManager.MODE_IN_COMMUNICATION || mode == AudioManager.MODE_RINGTONE) {
+            return true
+        }
+        return manager.isMusicActive
     }
 
     private fun getAudioFocusRequest(): AudioFocusRequestCompat {

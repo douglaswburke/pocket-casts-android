@@ -182,6 +182,8 @@ class PocketCastsApplication :
             // #6a: prime the uuid->cached-URL store before any download worker can run, so a
             // worker fetches the cached copy (byte-exact with the sidecar) not the ad-laden enclosure.
             au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodOverrideStore.init(this)
+            // Car-mode resume after a permanent focus loss (F-150 / Android Auto stop, 2026-10-02).
+            au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodCarResume.enabled = BuildConfig.SAMPOD_CAR_RESUME
             au.com.shiftyjelly.pocketcasts.sampod.SamPodSkipCoordinator(
                 playbackManager = playbackManager,
                 scope = applicationScope,

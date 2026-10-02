@@ -46,6 +46,14 @@ android {
             "SAMPOD_AUTODOWNLOAD",
             (sampodProp("sampod.autodownload").lowercase() != "false").toString(),
         )
+        // Car-mode resume: after a permanent AUDIOFOCUS_LOSS in the car (Android Auto / head unit
+        // source switch), poll for 60s and resume while nothing else is playing. Off switch, no
+        // code change: `sampod.carresume=false`. On by default.
+        buildConfigField(
+            "boolean",
+            "SAMPOD_CAR_RESUME",
+            (sampodProp("sampod.carresume").lowercase() != "false").toString(),
+        )
     }
 
     sourceSets {

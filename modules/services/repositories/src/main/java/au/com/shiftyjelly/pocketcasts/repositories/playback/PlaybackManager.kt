@@ -58,6 +58,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.podcast.ChapterManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.UserEpisodeManager
+import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodCarResume
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.toServerPostFile
 import au.com.shiftyjelly.pocketcasts.repositories.shownotes.ShowNotesManager
 import au.com.shiftyjelly.pocketcasts.repositories.sync.NotificationBroadcastReceiver
@@ -123,6 +124,7 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -227,6 +229,12 @@ open class PlaybackManager @Inject constructor(
     private var resettingPlayer = false
     private var episodeLastBufferStatus: EpisodeBufferStatus? = null
     private var focusWasPlaying: Date? = null
+    // SamPod car-mode resume (see SamPodCarResume): the pending retry loop after a permanent
+    // focus loss in the car, plus re-steal bookkeeping so we don't fight a real focus holder forever.
+    @Volatile private var carResumeJob: Job? = null
+    @Volatile private var carResumeReplaying = false
+    private var lastCarResumeAtMs: Long = 0L
+    private var consecutiveCarResteals: Int = 0
     private var forcePlayerSwitch = false
     private var updateTimerDisposable: Disposable? = null
     private var bufferUpdateTimerDisposable: Disposable? = null
@@ -979,6 +987,9 @@ open class PlaybackManager @Inject constructor(
     }
 
     suspend fun pauseSuspend(transientLoss: Boolean = false, sourceView: SourceView = SourceView.UNKNOWN) {
+        if (sourceView != SourceView.AUTO_PAUSE) {
+            cancelCarResume("paused from ${sourceView.name}")
+        }
         if (!transientLoss) {
             focusManager.giveUpAudioFocus()
             playbackStateRelay.blockingFirst().let { playbackState ->
@@ -1023,6 +1034,7 @@ open class PlaybackManager @Inject constructor(
 
     suspend fun stop() {
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Stopping playback")
+        cancelCarResume("stopped")
 
         cancelPrefetchNextEpisode()
         cancelUpdateTimer()
@@ -1910,7 +1922,87 @@ open class PlaybackManager @Inject constructor(
             .launchIn(this)
     }
 
+    /**
+     * SamPod car-mode resume. A permanent focus loss drops us out of Android's focus stack, so
+     * no GAIN ever arrives and [onFocusGain] can't resume us. In the car (Android Auto / head
+     * unit) that loss is routinely the car taking focus for a source switch and then going
+     * silent — so poll for a short window and re-take focus only while nothing else is playing.
+     * Every outcome is logged so the next in-app log proves what happened.
+     */
+    private fun scheduleCarResumeIfInCar() {
+        if (!SamPodCarResume.enabled) {
+            LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: disabled (sampod.carresume=false), not resuming")
+            return
+        }
+        val route = focusManager.carAudioRouteOrNull(application)
+        if (route == null) {
+            LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: permanent focus loss but no car audio route, not resuming")
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        if (lastCarResumeAtMs != 0L && now - lastCarResumeAtMs < SamPodCarResume.RESTEAL_MS) {
+            consecutiveCarResteals += 1
+        } else {
+            consecutiveCarResteals = 0
+        }
+        if (consecutiveCarResteals >= SamPodCarResume.MAX_CONSECUTIVE_RESTEALS) {
+            LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: focus stolen again %d times in a row within %ds of resuming, giving up (route: %s)", consecutiveCarResteals, SamPodCarResume.RESTEAL_MS / 1000, route)
+            return
+        }
+
+        carResumeJob?.cancel()
+        val lossAt = now
+        LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: permanent focus loss in car (route: %s), will retry every %ds for up to %ds", route, SamPodCarResume.POLL_MS / 1000, SamPodCarResume.WINDOW_MS / 1000)
+        carResumeJob = launch {
+            var attempt = 0
+            while (System.currentTimeMillis() - lossAt < SamPodCarResume.WINDOW_MS) {
+                delay(SamPodCarResume.POLL_MS)
+                if (focusWasPlaying == null || player == null) {
+                    LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: state changed underneath us (focusWasPlaying=%s, player=%s), stopping", focusWasPlaying != null, player != null)
+                    return@launch
+                }
+                if (isPlaying()) {
+                    LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: already playing again, nothing to do")
+                    return@launch
+                }
+                if (focusManager.isOtherAudioActive()) {
+                    continue
+                }
+                attempt += 1
+                LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: nothing else playing %ds after loss, re-taking focus (attempt %d)", (System.currentTimeMillis() - lossAt) / 1000, attempt)
+                lastCarResumeAtMs = System.currentTimeMillis()
+                carResumeReplaying = true
+                try {
+                    playQueueSuspend(sourceView = SourceView.AUTO_PAUSE)
+                } finally {
+                    carResumeReplaying = false
+                }
+                // play() logs "Couldn't get audio focus" itself when refused; poll again.
+                delay(SamPodCarResume.POLL_MS)
+                if (isPlaying()) {
+                    LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: resumed playback after permanent focus loss (attempt %d)", attempt)
+                    focusWasPlaying = null
+                    return@launch
+                }
+            }
+            LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: window of %ds expired without resuming (other audio stayed active or focus kept being refused)", SamPodCarResume.WINDOW_MS / 1000)
+        }
+    }
+
+    private fun cancelCarResume(reason: String) {
+        // Our own replay can pass through pause() (player switch); never cancel ourselves mid-resume.
+        if (carResumeReplaying) return
+        val job = carResumeJob ?: return
+        carResumeJob = null
+        if (job.isActive) {
+            job.cancel()
+            LogBuffer.i(LogBuffer.TAG_PLAYBACK, "SamPod car-resume: cancelled (%s)", reason)
+        }
+    }
+
     override fun onFocusGain(shouldResume: Boolean) {
+        cancelCarResume("focus gained")
         val lastPlayingTime = focusWasPlaying
         if (shouldResume && lastPlayingTime != null) {
             val timeout = Date(lastPlayingTime.time + MAX_TIME_WITHOUT_FOCUS_FOR_RESUME)
@@ -1949,6 +2041,10 @@ open class PlaybackManager @Inject constructor(
             focusWasPlaying = Date()
 
             pause(transientLoss = transientLoss, sourceView = SourceView.AUTO_PAUSE)
+
+            if (!transientLoss) {
+                scheduleCarResumeIfInCar()
+            }
         } else {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Focus lost not playing")
             focusWasPlaying = null
