@@ -37,6 +37,54 @@ plugins {
     alias(libs.plugins.room) apply false
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SamPod config guard — fail the BUILD, not the app.
+//
+// sampod.server / sampod.token are compile-time BuildConfig values read from
+// local.properties, which is gitignored. A missing key used to resolve to "" and ship a
+// silently dead ad-skip integration: no requests, no errors, no log line. That cost five
+// days in Oct 2026 and sent the investigation down two wrong paths before anyone looked at
+// the baked-in value.
+//
+// It also rejects a *.ts.net hostname, which looks right and cannot work. With Funnel
+// enabled, macmini.tailc7af5f.ts.net resolves to Tailscale's PUBLIC Funnel ingress
+// (208.111.x), and Funnel only carries the routes it is configured for — the SamPod port is
+// published `tailnet only`, so it answers on the tailnet IP and never on the name. Measured
+// 2026-10-12: name:8848 refused, 100.92.103.81:8848 → 200.
+//
+// Escape hatch: set `sampod.disabled=true` in local.properties to build without SamPod.
+run {
+    val lp = rootProject.file("local.properties")
+    val props = java.util.Properties().apply { if (lp.exists()) lp.inputStream().use { load(it) } }
+    fun prop(k: String) = (props.getProperty(k) ?: "").trim()
+
+    if (prop("sampod.disabled").lowercase() != "true") {
+        val server = prop("sampod.server")
+        val token = prop("sampod.token")
+        val fix = "Set these in ${lp.path} (gitignored):\n" +
+            "    sampod.server=http://100.92.103.81:8848   # tailnet IP, NOT the ts.net name\n" +
+            "    sampod.token=<value of SamKeys `sampod-server-token`>\n" +
+            "  or set sampod.disabled=true to build without ad-skip."
+
+        if (server.isEmpty() || token.isEmpty()) {
+            val missing = listOfNotNull(
+                if (server.isEmpty()) "sampod.server" else null,
+                if (token.isEmpty()) "sampod.token" else null,
+            ).joinToString(" and ")
+            throw GradleException(
+                "SamPod ad-skip would be built DEAD: $missing is missing or empty.\n  $fix"
+            )
+        }
+        if (Regex("""://[^/]*\.ts\.net""").containsMatchIn(server)) {
+            throw GradleException(
+                "SamPod sampod.server points at a Tailscale *.ts.net hostname:\n    $server\n" +
+                    "  That name resolves to the PUBLIC Funnel ingress, which does not serve the\n" +
+                    "  SamPod port (published `tailnet only`). Use the tailnet IP instead.\n  $fix"
+            )
+        }
+    }
+}
+
 apply(from = rootProject.file("dependencies.gradle.kts"))
 apply(from = "scripts/git-hooks/install.gradle")
 

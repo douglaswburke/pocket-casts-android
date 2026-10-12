@@ -14,7 +14,8 @@ sentry {
     projectName = project.findProperty("sentryAndroidProject")?.toString()
 }
 
-// SamPod server config, read from local.properties (gitignored). Blank if unset → ad-skip no-ops.
+// SamPod server config, read from local.properties (gitignored). A blank value used to ship a
+// silently dead integration; the root build.gradle.kts guard now fails the build instead.
 val sampodProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
