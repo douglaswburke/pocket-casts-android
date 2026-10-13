@@ -205,10 +205,24 @@ object SamPodAnalyzed {
         }
     }
 
-    /** Must match canon.eid_for() on the server: sha1(audio_url) truncated to 16 hex chars. */
-    private fun sampodId(input: String): String =
+    /**
+     * The SamPod episode id. MUST match canon.eid_for() on the server byte for byte:
+     * sha1 of the enclosure URL with its fragment and query string stripped, first 16 hex chars.
+     *
+     * Why the strip (2026-10-13): art19 stamps the fetching client into the enclosure URL as
+     * `?rss_browser=<base64 UA>`, so this app, the nightly ingest and a probe each hashed a
+     * different URL for the same episode and the app never found the server's analysis
+     * (Ferriss, Art of Manliness, Anthropocene Reviewed). Identity now ignores the query;
+     * the URL actually fetched is untouched. The single definition for the whole app — the
+     * skip coordinator uses this too.
+     */
+    fun sampodId(input: String): String =
         MessageDigest.getInstance("SHA-1")
-            .digest(input.toByteArray())
+            .digest(normalizeAudioUrl(input).toByteArray())
             .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
             .take(16)
+
+    /** Mirror of canon.normalize_audio_url(): trim, drop from the first '#', then from the first '?'. */
+    fun normalizeAudioUrl(url: String): String =
+        url.trim().substringBefore('#').substringBefore('?')
 }

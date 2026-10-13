@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
+import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodAnalyzed
 import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodOverrideStore
 import au.com.shiftyjelly.pocketcasts.repositories.sampod.SamPodRelearnBus
 import kotlinx.coroutines.CoroutineScope
@@ -17,14 +18,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.rx2.asFlow
 import kotlinx.coroutines.withContext
-import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * SamPod ad-skip — wired into the Pocket Casts player WITHOUT editing PlaybackManager.
  *
  * Started once from PocketCastsApplication. It observes playbackStateFlow, loads the SamPod
- * server's skip-sidecar for the current episode (id = sha1(downloadUrl)[:16], matching how the
+ * server's skip-sidecar for the current episode (id = sha1(downloadUrl minus query/fragment)[:16], matching how the
  * server keys episodes), and seeks past ad windows via seekToTimeMs. Confidence gate + re-fire
  * guard live in AdSkipController. No-op if the server/token BuildConfig fields are blank.
  *
@@ -316,9 +316,6 @@ class SamPodSkipCoordinator(
         )
     }
 
-    private fun sha1Id(input: String): String =
-        MessageDigest.getInstance("SHA-1")
-            .digest(input.toByteArray())
-            .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-            .take(16)
+    // One definition of the id for the whole app (query/fragment-insensitive since 2026-10-13).
+    private fun sha1Id(input: String): String = SamPodAnalyzed.sampodId(input)
 }
